@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Money Bot — Cockpit</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#131722; --line:#1f2740; --txt:#dfe6f3; --dim:#8a94ad;
+    --green:#26c281; --red:#ff5c5c; --gold:#f0b90b; --blue:#4da3ff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--txt); font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; padding:18px; max-width:1200px; margin:auto; }
+  h1 { font-size:20px; margin-bottom:2px; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:14px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; flex:1; min-width:220px; }
+  .card h3 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin-bottom:8px; }
+  .big { font-size:26px; font-weight:700; }
+  .chip { display:inline-block; padding:2px 10px; border-radius:20px; border:1px solid var(--line); font-size:12px; color:var(--dim); margin:2px 4px 2px 0; }
+  button, select { background:#1b2340; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  button:hover { background:#242e56; }
+  button:disabled { opacity:.5; cursor:wait; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th, td { padding:7px 8px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap; }
+  th { color:var(--dim); font-weight:600; font-size:11px; text-transform:uppercase; }
+  td:first-child, th:first-child { text-align:left; }
+  .long { color:var(--green); font-weight:700; } .short { color:var(--red); font-weight:700; }
+  .confbar { display:inline-block; width:64px; height:8px; background:#222b45; border-radius:4px; overflow:hidden; vertical-align:middle; }
+  .confbar i { display:block; height:100%; background:linear-gradient(90deg,var(--gold),var(--green)); }
+  canvas { width:100%; height:260px; background:#0e1220; border:1px solid var(--line); border-radius:8px; }
+  .zpos { color:var(--green); } .zneg { color:var(--dim); }
+  .foot { color:var(--dim); font-size:12px; margin-top:10px; }
+  .warn { background:#2a1f0d; border:1px solid #6b4d15; color:#ffd98a; border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>🧠 Smart Money Bot — Cockpit</h1>
+<div class="sub">15m · UT Bot core · SMC · EMA200 + VWAP · structural stops · z-score ranking · <b>paper only</b></div>
+<div class="warn">⚠️ Educational tool — not financial advice. This bot only reads public market data and paper-trades. It cannot place real orders.</div>
+
+<div class="row">
+  <div class="card"><h3>Status</h3><div id="status">loading…</div></div>
+  <div class="card"><h3>Backtest</h3>
+    <select id="pairSel"></select>
+    <button id="runBtn" onclick="runBacktest()">▶ Run backtest</button>
+    <div id="runMsg" class="sub"></div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="card"><h3>Signals on tape</h3><div class="big" id="stCount">–</div></div>
+  <div class="card"><h3>Avg confidence</h3><div class="big" id="stConf">–</div></div>
+  <div class="card"><h3>Best z-score</h3><div class="big" id="stZ">–</div></div>
+  <div class="card"><h3>Win rate (backtest)</h3><div class="big" id="stWin">–</div></div>
+</div>
+
+<div class="card" style="margin-bottom:14px"><h3>🏆 Top signals — ranked by z-score (highest first)</h3>
+  <div style="overflow-x:auto"><table id="sigTable">
+    <thead><tr><th>#</th><th>Time</th><th>Pair</th><th>Side</th><th>Entry</th><th>SL</th><th>TP2</th><th>Conf</th><th>z</th><th>Hold~</th><th>Filters</th></tr></thead>
+    <tbody><tr><td colspan="11">loading…</td></tr></tbody>
+  </table></div>
+</div>
+
+<div class="row">
+  <div class="card"><h3>📈 Equity curve</h3><canvas id="eqChart" width="520" height="260"></canvas><div class="foot" id="eqStats"></div></div>
+  <div class="card"><h3>🕯 Price + zones + signals</h3><canvas id="pxChart" width="520" height="260"></canvas><div class="foot" id="pxStats"></div></div>
+</div>
+
+<div class="card"><h3>🚫 Blocked flips (fake-signal filter)</h3><div id="blocked">loading…</div></div>
+<div class="foot">auto-refresh 30s · data: public OHLC only · signals commit on bar close (no repaint)</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pairs = [], curPair = null;
+
+async function jget(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+const f2 = (n) => n >= 1000 ? n.toLocaleString('en-US', {maximumFractionDigits:1}) : Number(n.toPrecision(6));
+
+async function loadStatus() {
+  try {
+    const s = await jget('/api/status');
+    pairs = s.pairs || [];
+    if (!curPair) curPair = pairs[0];
+    $('pairSel').innerHTML = pairs.map(p => `<option ${p===curPair?'selected':''}>${p}</option>`).join('');
+    $('status').innerHTML =
+      `<span class="chip">📡 ${s.provider}</span><span class="chip">⏱ ${s.timeframeMin}m</span>` +
+      `<span class="chip">✈️ tg ${s.telegram ? 'on' : 'off'}</span>` +
+      `<span class="chip">🕒 ${s.signalsUpdatedAt ? new Date(s.signalsUpdatedAt).toLocaleString() : 'no signals yet'}</span>`;
+  } catch (e) { $('status').textContent = 'status error: ' + e.message; }
+}
+
+async function loadSignals() {
+  try {
+    const rows = await jget('/api/signals?limit=50');
+    $('stCount').textContent = rows.length;
+    $('stConf').textContent = rows.length ? (rows.reduce((a,r)=>a+r.confidence,0)/rows.length).toFixed(1) : '–';
+    $('stZ').textContent = rows.length ? ('+' + Math.max(...rows.map(r=>r.z)).toFixed(2)) : '–';
+    $('sigTable').querySelector('tbody').innerHTML = rows.length ? rows.map((s,i) => `
+      <tr><td>${i+1}</td><td>${new Date(s.time).toISOString().slice(5,16).replace('T',' ')}</td>
+      <td>${s.pair}</td><td class="${s.side}">${s.side.toUpperCase()}</td>
+      <td>${f2(s.entry)}</td><td>${f2(s.sl)}</td><td>${f2(s.tps[2] ?? s.tps[0])}</td>
+      <td><span class="confbar"><i style="width:${s.confidence}%"></i></span> ${s.confidence}</td>
+      <td class="${s.z>=0?'zpos':'zneg'}">${s.z>=0?'+':''}${s.z}</td>
+      <td>${s.forecastBars}b${s.forecastLowHistory?'*':''}</td><td>${s.filtersPassed.length}</td></tr>`).join('')
+      : '<tr><td colspan="11">no signals yet — run a backtest</td></tr>';
+  } catch (e) { /* keep old */ }
+}
+
+function drawLines(cv, series, opts) {
+  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
+  ctx.clearRect(0,0,W,H);
+  if (!series.length) { ctx.fillStyle='#8a94ad'; ctx.fillText('no data', 20, 30); return; }
+  const ys = series.map(s=>s.y);
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (hi-lo < 1e-9) hi = lo+1;
+  const X = (i) => 8 + (W-16) * i / Math.max(1, series.length-1);
+  const Y = (v) => H-12 - (H-24) * (v-lo) / (hi-lo);
+  ctx.strokeStyle = opts.color || '#26c281'; ctx.lineWidth = 1.6; ctx.beginPath();
+  series.forEach((s,i) => i ? ctx.lineTo(X(i),Y(s.y)) : ctx.moveTo(X(i),Y(s.y)));
+  ctx.stroke();
+  if (opts.band) { // min/max band
+    ctx.fillStyle = 'rgba(77,163,255,.12)'; ctx.beginPath();
+    series.forEach((s,i) => i ? ctx.lineTo(X(i),Y(s.y)) : ctx.moveTo(X(i),Y(s.y)));
+    ctx.lineTo(W-8,H-12); ctx.lineTo(8,H-12); ctx.fill();
+  }
+  ctx.fillStyle = '#8a94ad'; ctx.font = '10px sans-serif';
+  ctx.fillText(f2(hi), 10, 14); ctx.fillText(f2(lo), 10, H-4);
+}
+
+function drawCandles(cv, candles, zones, signals) {
+  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
+  ctx.clearRect(0,0,W,H);
+  if (!candles.length) { ctx.fillStyle='#8a94ad'; ctx.fillText('no data — run backtest', 20, 30); return; }
+  let lo = Math.min(...candles.map(c=>c.low)), hi = Math.max(...candles.map(c=>c.high));
+  const pad = (hi-lo)*0.06 || 1; lo -= pad; hi += pad;
+  const bw = (W-16) / candles.length;
+  const X = (i) => 8 + bw*i + bw/2, Y = (v) => H-12 - (H-24)*(v-lo)/(hi-lo);
+  for (const z of (zones||[]).slice(0,8)) {
+    ctx.strokeStyle = z.dir === 1 ? 'rgba(38,194,129,.4)' : 'rgba(255,92,92,.4)';
+    ctx.setLineDash([5,4]); ctx.beginPath(); ctx.moveTo(8,Y(z.price)); ctx.lineTo(W-8,Y(z.price)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#8a94ad'; ctx.font = '9px sans-serif'; ctx.fillText(`${z.dir===1?'S':'R'} ${f2(z.price)} (${z.touches}x)`, W-110, Y(z.price)-3);
+  }
+  candles.forEach((c,i) => {
+    const up = c.close >= c.open;
+    ctx.strokeStyle = up ? '#26c281' : '#ff5c5c'; ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath(); ctx.moveTo(X(i),Y(c.high)); ctx.lineTo(X(i),Y(c.low)); ctx.stroke();
+    const y1 = Y(Math.max(c.open,c.close)), y2 = Y(Math.min(c.open,c.close));
+    ctx.fillRect(X(i)-Math.max(1,bw*0.3), y1, Math.max(2,bw*0.6), Math.max(1,y2-y1));
+  });
+  const t0 = candles[0].time, t1 = candles[candles.length-1].time;
+  for (const s of (signals||[])) {
+    if (s.time < t0 || s.time > t1) continue;
+    const i = candles.findIndex(c=>c.time>=s.time);
+    if (i < 0) continue;
+    ctx.fillStyle = s.side === 'long' ? '#26c281' : '#ff5c5c';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillText(s.side === 'long' ? '▲' : '▼', X(i)-4, s.side === 'long' ? Y(candles[i].low)+14 : Y(candles[i].high)-6);
+  }
+}
+
+async function loadPair() {
+  if (!curPair) return;
+  const safe = curPair.replace(/[^A-Za-z0-9]/g,'');
+  try {
+    const eq = await jget('/api/equity?pair=' + encodeURIComponent(curPair));
+    drawLines($('eqChart'), eq.filter((_,i)=>i%2===0).map(p=>({y:p.equity})), {color:'#4da3ff', band:true});
+  } catch (e) { drawLines($('eqChart'), [], {}); }
+  try {
+    const b = await jget('/api/backtest?pair=' + encodeURIComponent(curPair));
+    $('stWin').textContent = b.stats.trades ? b.stats.winRate.toFixed(1)+'%' : '–';
+    $('eqStats').textContent = `trades ${b.stats.trades} · PF ${Number.isFinite(b.stats.profitFactor)?b.stats.profitFactor.toFixed(2):'∞'} · expR ${b.stats.expectancyR.toFixed(2)} · PnL $${b.stats.totalPnl.toFixed(0)} · maxDD ${b.stats.maxDrawdownPct.toFixed(1)}% · logRet ${b.stats.totalLogReturn.toFixed(3)}`;
+    drawCandles($('pxChart'), b.candlesTail || [], b.zones || [], b.signals || []);
+    $('pxStats').textContent = `${b.bars} bars · ${b.flips} flips · ${b.signals.length} signals · ${(b.zones||[]).length} zones`;
+    $('blocked').innerHTML = `blocked flips: <b>${b.blockedSummary?.count ?? 0}</b> — ` +
+      ((b.blockedSummary?.topReasons||[]).map(([r,n])=>`<span class="chip">${r} ×${n}</span>`).join(' ') || 'none');
+  } catch (e) {
+    $('pxStats').textContent = 'no backtest yet for ' + curPair;
+    drawCandles($('pxChart'), [], [], []);
+  }
+}
+
+async function runBacktest() {
+  $('runBtn').disabled = true; $('runMsg').textContent = 'running… (fetches data, ~30s)';
+  try {
+    const r = await fetch('/api/run-backtest?pair=' + encodeURIComponent($('pairSel').value), {method:'POST'});
+    const j = await r.json();
+    $('runMsg').textContent = j.ok ? 'done ✔' : ('failed: ' + j.error);
+    await refresh();
+  } catch (e) { $('runMsg').textContent = 'failed: ' + e.message; }
+  $('runBtn').disabled = false;
+}
+
+$('pairSel').addEventListener('change', (e) => { curPair = e.target.value; loadPair(); });
+async function refresh() { await loadStatus(); await loadSignals(); await loadPair(); }
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
