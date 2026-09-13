@@ -1,5 +1,7 @@
 # Smart Money Bot — 15m UT-Bot + SMC paper trader
 
+[![quality](https://github.com/hesam-oxe/smart-money-bot/actions/workflows/quality.yml/badge.svg)](https://github.com/hesam-oxe/smart-money-bot/actions/workflows/quality.yml)
+
 A working, paper-only 15-minute trading bot that blends a **UT-Bot ATR-trailing core**
 (classic + adaptive) with **Smart Money Concepts** (swings, BOS/CHoCH, double-validated
 order blocks, fair value gaps, S/R zones), a 10-filter anti-noise stack, a 7-engine
@@ -30,7 +32,8 @@ forecasts, Telegram alerts, and an HTML cockpit dashboard.
    buffer, ATR fallback), four R-multiple targets, risk-% sizing, and an EWMA +
    survival-table duration forecast that doubles as a time stop.
 7. **Paper broker** — next-open fills, SL-checked-first intrabar exits, fees, equity
-   curve, full stats (win rate, profit factor, expectancy, log returns).
+   curve, full stats (win rate, profit factor, expectancy, log returns). Live
+   positions move the stop to breakeven once TP1 touches.
 
 ## Quick start
 
@@ -40,10 +43,11 @@ npm run backtest                  # 15m backtest, XBTUSD + ETHUSD, ~7.5 days
 npm run backtest -- --fresh       # skip the 6h disk cache
 npm run backtest -- --pair SOLUSD # single pair
 PAIRS=SOLUSD,DOGEUSD npm run backtest
+npm run tune -- --pair XBTUSD     # walk-forward-lite grid search (IS pick + OOS verify)
 npm run paper                     # paper-live loop (polls Kraken, Telegram alerts)
 npm run paper -- --once           # single poll, then exit
 npm run dashboard                 # cockpit UI -> http://localhost:8080
-npm test                          # vitest suite (35 tests)
+npm test                          # vitest suite
 ```
 
 Zero API keys needed — the default Kraken provider uses public OHLC endpoints.
@@ -75,10 +79,35 @@ Copy `.env.example` to `.env` — every knob is there with defaults:
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | — | alerts (console fallback when empty) |
 | `POLL_SEC` / `DASH_PORT` | `60` / `8080` | live poll interval / dashboard port |
 
+## Tuning without fooling yourself
+
+`npm run tune` grid-searches sensitivity × ADX × min-confidence on the **first** half
+of history, then reports the winners on the **second** half they never saw:
+
+```bash
+npm run tune -- --pair XBTUSD
+```
+
+In-sample darlings usually wilt out-of-sample — that gap is the most honest number
+in the repo. Trust OOS expectancy, not IS. Full grid lands in `results/tune-*.json`.
+
+## Outputs (`results/`, git-ignored)
+
+| File | What it is |
+|---|---|
+| `backtest-<PAIR>.json` | signals, trades, stats, zones, candle tail |
+| `trades-<PAIR>.csv` | trade log — opens in Excel / Google Sheets |
+| `equity-<PAIR>.json` | per-bar equity curve for the dashboard |
+| `portfolio.json` | multi-pair aggregate (independent sims, PnL summed) |
+| `tune-<PAIR>.json` | full tuning grid with IS/OOS scores |
+| `signals.jsonl` | merged signal tape (dashboard + live append here) |
+| `live-state.json` | paper-live equity, open positions, seen signals |
+
 ## Telegram alerts
 
-Set the two `TELEGRAM_*` vars (env or `.env`) and every fresh signal + every paper
-close is pushed to your chat automatically. Without them, alerts print to the console.
+Set the two `TELEGRAM_*` vars (env or `.env`) and every fresh signal, breakeven move,
+and paper close is pushed to your chat automatically. Without them, alerts print to
+the console.
 
 ## Project layout
 
@@ -90,8 +119,10 @@ close is pushed to your chat automatically. Without them, alerts print to the co
 | `src/risk.ts` | stop methods, R targets, sizing, trade stats |
 | `src/strategy.ts` | signal engine: flips → filters → confidence → plan → forecast → z-rank |
 | `src/paper.ts` | paper broker + equity curve |
+| `src/positions.ts` | live position updates: SL-first, TP1→breakeven (pure, tested) |
 | `src/telegram.ts` | Bot API alerts with console fallback |
-| `src/backtest.ts` | backtest CLI |
+| `src/backtest.ts` | backtest CLI (+ CSV export, portfolio aggregate) |
+| `src/tune.ts` | walk-forward-lite parameter tuner |
 | `src/live.ts` | paper-live polling loop |
 | `src/dashboard.ts` | zero-dep HTTP server + JSON APIs |
 | `public/index.html` | cockpit dashboard UI |

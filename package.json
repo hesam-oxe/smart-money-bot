@@ -1,6 +1,6 @@
 {
   "name": "smart-money-bot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Smart Money Concepts trading bot — 15m signals, UT Bot core, EMA200 + VWAP trend, structural stops, z-score ranking. Paper trading only.",
   "type": "module",
   "engines": {
@@ -12,7 +12,8 @@
     "test": "vitest run",
     "backtest": "tsx src/backtest.ts",
     "paper": "tsx src/live.ts",
-    "dashboard": "tsx src/dashboard.ts"
+    "dashboard": "tsx src/dashboard.ts",
+    "tune": "tsx src/tune.ts"
   },
   "dependencies": {},
   "devDependencies": {

@@ -7,29 +7,15 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { loadCandles } from './data.js';
-import { runEngine } from './strategy.js';
+import { rankSignals, runEngine } from './strategy.js';
 import { formatSignal, sendTelegram } from './telegram.js';
 import { loadConfig, loadDotEnv } from './config.js';
 import { strategyFromApp } from './backtest.js';
-import type { Side } from './types.js';
-
-interface Position {
-  id: string;
-  pair: string;
-  side: Side;
-  entry: number;
-  sl: number;
-  tp: number;
-  size: number;
-  entryTime: number;
-  barsHeld: number;
-  forecastBars: number;
-  signalId: string;
-}
+import { closeEconomics, updatePosition, type LivePosition } from './positions.js';
 
 interface LiveState {
   seen: string[];
-  positions: Position[];
+  positions: LivePosition[];
   equity: number;
   lastBar: Record<string, number>;
 }
@@ -98,11 +84,13 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
           entry: s.entry,
           sl: s.sl,
           tp,
+          tp1: s.tps[0]!,
           size: s.size,
           entryTime: s.time,
           barsHeld: 0,
           forecastBars: s.forecastBars,
           signalId: s.id,
+          breakeven: false,
         });
       }
     }
@@ -112,32 +100,23 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
     for (const p of [...state.positions]) {
       if (p.pair !== pair) continue;
       if (isNewBar) p.barsHeld++;
-      let exit: number | null = null;
-      let reason = '';
-      if (p.side === 'long') {
-        if (b.low <= p.sl) {
-          exit = p.sl;
-          reason = 'SL ❌';
-        } else if (b.high >= p.tp) {
-          exit = p.tp;
-          reason = 'TP ✅';
-        }
-      } else {
-        if (b.high >= p.sl) {
-          exit = p.sl;
-          reason = 'SL ❌';
-        } else if (b.low <= p.tp) {
-          exit = p.tp;
-          reason = 'TP ✅';
-        }
+      const ev = updatePosition(p, b);
+      if (ev.movedStopToBreakeven) {
+        await saveState(state); // persist the moved stop immediately
+        await sendTelegram(
+          app.telegramToken,
+          app.telegramChatId,
+          `🔒 BREAKEVEN ${p.pair} ${p.side}\nTP1 touched — stop moved to entry ${p.entry}`,
+        );
       }
+      let exit: number | null = ev.exit ? ev.exit.price : null;
+      let reason = ev.exit ? (ev.exit.reason === 'tp' ? 'TP ✅' : 'SL ❌') : '';
       if (exit === null && p.barsHeld >= p.forecastBars && p.forecastBars > 0) {
         exit = b.close;
         reason = 'TIME ⏱';
       }
       if (exit !== null) {
-        const fee = (p.entry * p.size + exit * p.size) * (app.feeBps / 1e4);
-        const pnl = (p.side === 'long' ? exit - p.entry : p.entry - exit) * p.size - fee;
+        const { pnl } = closeEconomics(p.side, p.entry, exit, p.size, app.feeBps);
         state.equity += pnl;
         state.positions = state.positions.filter((x) => x.id !== p.id);
         closedTrades++;
@@ -169,9 +148,33 @@ function isMain(): boolean {
   }
 }
 
+/** Preview fresh signals without touching state, positions or Telegram. */
+export async function dryRun(): Promise<void> {
+  await loadDotEnv();
+  const app = loadConfig();
+  const strat = strategyFromApp(app);
+  for (const pair of app.pairs) {
+    const m15 = await loadCandles(app.provider, pair, app.timeframeMin, { live: true });
+    let h1 = null;
+    try {
+      h1 = (await loadCandles(app.provider, pair, 60, {})).closed;
+    } catch { /* MTF neutral */ }
+    const eng = runEngine(m15.closed, strat.useMtf ? h1 : null, pair, strat);
+    console.log(`\n── ${pair}: ${eng.flips} flips, ${eng.signals.length} signals (dry — nothing saved) ──`);
+    for (const s of rankSignals(eng.signals).slice(0, 5)) {
+      console.log(`\n${formatSignal(s)}`);
+    }
+  }
+}
+
 if (isMain()) {
   const once = process.argv.includes('--once');
+  const dry = process.argv.includes('--dry');
   const app = await loadConfigSafe();
+  if (dry) {
+    await dryRun();
+    process.exit(0);
+  }
   if (once) {
     await pollOnce();
     process.exit(0);

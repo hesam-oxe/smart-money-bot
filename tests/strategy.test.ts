@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PRESET_15M, rankSignals, runEngine } from '../src/strategy.js';
+import { utbot } from '../src/indicators.js';
 import type { Candle } from '../src/types.js';
 import { candlesFromCloses, chopMarket, mulberry32 } from './helpers.js';
 
@@ -63,5 +64,30 @@ describe('gates', () => {
     for (let i = 1; i < ranked.length; i++) {
       expect(ranked[i - 1]!.z).toBeGreaterThanOrEqual(ranked[i]!.z);
     }
+  });
+});
+
+describe('confirmation + cooldown machinery', () => {
+  it('counts flips identically with or without confirmation', () => {
+    const raw = runEngine(pullbackTrend(), null, 'T', { ...cfg, twoBarConfirm: false });
+    const conf = runEngine(pullbackTrend(), null, 'T', { ...cfg, twoBarConfirm: true });
+    expect(raw.flips).toBe(conf.flips);
+    expect(raw.flips).toBeGreaterThan(0);
+  });
+  it('confirmed signals sit on a held (2-bar) UT direction', () => {
+    const cs = pullbackTrend();
+    const out = runEngine(cs, null, 'T', { ...cfg, twoBarConfirm: true });
+    expect(out.signals.length).toBeGreaterThan(0);
+    const u = utbot(cs, cfg.utKey, cfg.utAtrLen, { classic: cfg.classicUt, chopStrength: cfg.chopStrength });
+    const t2i = new Map(cs.map((c, i) => [c.time, i] as [number, number]));
+    for (const s of out.signals) {
+      const i = t2i.get(s.time)!;
+      expect(u.dir[i]).toBe(s.side === 'long' ? 1 : -1);
+      expect(u.dir[i]).toBe(u.dir[i - 1]); // direction survived the confirmation bar
+    }
+  });
+  it('huge cooldown allows at most one signal', () => {
+    const out = runEngine(pullbackTrend(), null, 'T', { ...cfg, cooldownBars: 1000 });
+    expect(out.signals.length).toBeLessThanOrEqual(1);
   });
 });

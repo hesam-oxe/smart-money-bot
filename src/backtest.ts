@@ -10,6 +10,7 @@ import { PRESET_15M, rankSignals, runEngine, type StrategyConfig } from './strat
 import { runPaper } from './paper.js';
 import { loadConfig, loadDotEnv, type AppConfig } from './config.js';
 import type { SLMethod } from './risk.js';
+import type { BacktestStats, Trade } from './types.js';
 
 export interface BacktestCLIOpts {
   pairs?: string[];
@@ -57,6 +58,14 @@ export function strategyFromApp(c: AppConfig): StrategyConfig {
   };
 }
 
+export interface PairResult {
+  pair: string;
+  bars: number;
+  flips: number;
+  signals: number;
+  stats: BacktestStats;
+}
+
 export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<string, unknown>[]> {
   await loadDotEnv();
   const app = loadConfig();
@@ -71,6 +80,7 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
   await mkdir('results', { recursive: true });
 
   const summaries: Record<string, unknown>[] = [];
+  const perPair: PairResult[] = [];
   const allSignals: string[] = [];
 
   for (const pair of pairs) {
@@ -130,8 +140,10 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
     };
     await writeFile(`results/backtest-${safe}.json`, JSON.stringify(payload));
     await writeFile(`results/equity-${safe}.json`, JSON.stringify(paper.equityCurve));
+    await writeFile(`results/trades-${safe}.csv`, tradesCsv(paper.trades));
     for (const sg of eng.signals) allSignals.push(JSON.stringify(sg));
     summaries.push({ pair, bars: m15.closed.length, flips: eng.flips, signals: eng.signals.length, stats: s });
+    perPair.push({ pair, bars: m15.closed.length, flips: eng.flips, signals: eng.signals.length, stats: s });
   }
 
   // merged ranked signal tape for the dashboard
@@ -148,8 +160,71 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
     .sort((x, y) => x.time - y.time)
     .map((o) => JSON.stringify(o));
   await writeFile('results/signals.jsonl', sorted.join('\n') + (sorted.length ? '\n' : ''));
-  if (verbose) console.log(`\n✔ wrote results/ (${sorted.length} signals on tape)`);
+
+  // portfolio aggregate (pairs are simulated independently, each with full equity)
+  const portfolio = buildPortfolio(perPair, app.equity);
+  await writeFile('results/portfolio.json', JSON.stringify(portfolio, null, 1));
+  if (verbose) {
+    console.log('\n═══ PORTFOLIO (independent per-pair sims, PnL summed) ═══');
+    console.log(
+      `  pairs ${portfolio.pairs} | trades ${portfolio.trades} | win ${portfolio.winRate.toFixed(1)}% ` +
+        `| PnL $${portfolio.totalPnl.toFixed(2)} | avgExpR ${portfolio.avgExpectancyR.toFixed(2)}`,
+    );
+    console.log(`  best ${portfolio.bestPair} ($${portfolio.bestPnl.toFixed(0)}) · worst ${portfolio.worstPair} ($${portfolio.worstPnl.toFixed(0)})`);
+    console.log(`\n✔ wrote results/ (${sorted.length} signals on tape)`);
+  }
   return summaries;
+}
+
+/** Aggregate per-pair stats. Pairs run as independent sims; PnL is summed, not compounded. */
+export interface PortfolioSummary {
+  pairs: number;
+  trades: number;
+  wins: number;
+  winRate: number;
+  totalPnl: number;
+  totalReturnPct: number;
+  avgExpectancyR: number;
+  bestPair: string;
+  bestPnl: number;
+  worstPair: string;
+  worstPnl: number;
+}
+
+export function buildPortfolio(perPair: PairResult[], equity0: number): PortfolioSummary {
+  const trades = perPair.reduce((a, p) => a + p.stats.trades, 0);
+  const wins = perPair.reduce((a, p) => a + p.stats.wins, 0);
+  const totalPnl = perPair.reduce((a, p) => a + p.stats.totalPnl, 0);
+  const avgExpectancyR = perPair.length
+    ? perPair.reduce((a, p) => a + p.stats.expectancyR, 0) / perPair.length
+    : 0;
+  const byPnl = [...perPair].sort((x, y) => y.stats.totalPnl - x.stats.totalPnl);
+  return {
+    pairs: perPair.length,
+    trades,
+    wins,
+    winRate: trades ? (wins / trades) * 100 : 0,
+    totalPnl,
+    totalReturnPct: ((totalPnl / equity0) / Math.max(1, perPair.length)) * 100,
+    avgExpectancyR,
+    bestPair: byPnl[0]?.pair ?? '-',
+    bestPnl: byPnl[0]?.stats.totalPnl ?? 0,
+    worstPair: byPnl[byPnl.length - 1]?.pair ?? '-',
+    worstPnl: byPnl[byPnl.length - 1]?.stats.totalPnl ?? 0,
+  };
+}
+
+/** Spreadsheet-friendly trade log (opens in Excel / Google Sheets). */
+export function tradesCsv(trades: Trade[]): string {
+  const head = 'pair,side,entryTime,entry,exitTime,exit,exitReason,size,pnl,pnlPct,rMultiple,fees';
+  const rows = trades.map((t) =>
+    [
+      t.pair, t.side, new Date(t.entryTime).toISOString(), t.entry,
+      new Date(t.exitTime).toISOString(), t.exit, t.exitReason, t.size,
+      t.pnl.toFixed(2), t.pnlPct.toFixed(3), t.rMultiple.toFixed(3), t.fees.toFixed(4),
+    ].join(','),
+  );
+  return [head, ...rows].join('\n') + '\n';
 }
 
 async function readLines(path: string): Promise<string[]> {
