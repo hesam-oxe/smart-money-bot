@@ -107,6 +107,14 @@ function binanceSymbol(krakenPair: string): string {
   return `${b}USDT`;
 }
 
+/** Minutes -> Binance interval token (m / h / d / w). */
+function binanceInterval(intervalMin: number): string {
+  if (intervalMin % 10080 === 0) return `${intervalMin / 10080}w`;
+  if (intervalMin % 1440 === 0) return `${intervalMin / 1440}d`;
+  if (intervalMin >= 60) return `${Math.round(intervalMin / 60)}h`;
+  return `${intervalMin}m`;
+}
+
 /**
  * Load closed 15m (or `intervalMin`) bars for a pair, with disk cache.
  * Falls back gracefully: Binance error -> clear message (suggest Kraken).
@@ -126,8 +134,7 @@ export async function loadCandles(
     // NOTE: Kraken caps public OHLC at the latest 720 bars (`since` cannot backfill).
     set = await fetchKraken(pair, intervalMin);
   } else {
-    const tf = intervalMin >= 60 ? `${Math.round(intervalMin / 60)}h` : `${intervalMin}m`;
-    set = await fetchBinance(binanceSymbol(pair), tf);
+    set = await fetchBinance(binanceSymbol(pair), binanceInterval(intervalMin));
   }
   await writeCache(source, pair, intervalMin, set.closed);
   // small courtesy delay for public rate limits

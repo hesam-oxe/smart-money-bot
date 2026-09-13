@@ -5,7 +5,7 @@
 import type { BacktestStats, Side, Trade } from './types.js';
 import type { Swing } from './smc.js';
 
-export type SLMethod = 'structural' | 'atr' | 'scaled' | 'smart' | 'safer' | 'percent';
+export type SLMethod = 'structural' | 'atr' | 'scaled' | 'smart' | 'safer' | 'percent' | 'tick';
 
 export interface SLContext {
   swing: number | null; // structural reference: recent swing low (long) / high (short)
@@ -14,6 +14,7 @@ export interface SLContext {
   huntMult: number; // anti-hunt buffer in ATRs beyond structure
   atrMult: number; // base ATR multiple for atr-based methods
   pct: number; // % distance for the percent method
+  ticks: number; // price steps for the tick method
 }
 
 export interface SLResult {
@@ -80,6 +81,13 @@ export function computeSL(method: SLMethod, side: Side, entry: number, ctx: SLCo
     }
     case 'percent': {
       const d = entry * (ctx.pct / 100);
+      return { price: side === 'long' ? entry - d : entry + d, method: used };
+    }
+    case 'tick': {
+      // crypto spot has no contract tick — derive a venue-like step from price magnitude
+      // (e.g. 1.0 steps at 77k BTC, 0.1 at 2.5k ETH). Use hundreds of ticks for sane stops.
+      const tickSize = Math.pow(10, Math.floor(Math.log10(Math.max(entry, 1e-9))) - 4);
+      const d = tickSize * ctx.ticks;
       return { price: side === 'long' ? entry - d : entry + d, method: used };
     }
   }

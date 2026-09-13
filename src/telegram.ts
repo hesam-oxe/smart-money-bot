@@ -3,12 +3,13 @@ import type { Signal } from './types.js';
 
 export function formatSignal(s: Signal): string {
   const arrow = s.side === 'long' ? '🟢 LONG' : '🔴 SHORT';
+  const band = s.confidence >= 80 ? '💪 strong' : s.confidence >= 60 ? '👍 good' : s.confidence >= 40 ? '⚠️ weak' : '🚫 very-weak';
   const tps = s.tps.map((t, i) => `TP${s.tpRs[i]} ${fmt(t)}`).join(' | ');
   const surv = s.survival.length
     ? ` | hold~${s.forecastBars} bars (P50 ${s.survival[1]?.share ?? '-'}%)`
     : '';
   return (
-    `${arrow} ${s.pair} — conf ${s.confidence} (z ${s.z >= 0 ? '+' : ''}${s.z})${surv}\n` +
+    `${arrow} ${s.pair} — conf ${s.confidence} ${band} (z ${s.z >= 0 ? '+' : ''}${s.z})${surv}\n` +
     `Entry ${fmt(s.entry)} | SL ${fmt(s.sl)} [${s.slMethod}] | ${tps}\n` +
     `Size ${s.size.toPrecision(4)} | risk $${s.riskUsd.toFixed(2)} | ${new Date(s.time).toISOString()}`
   );

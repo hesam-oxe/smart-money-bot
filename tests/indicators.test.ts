@@ -130,3 +130,21 @@ describe('rsi divergence', () => {
     expect(bull.has(3)).toBe(true);
   });
 });
+
+import { hullMA, wma } from '../src/indicators.js';
+
+describe('wma + hull', () => {
+  it('wma weights recent bars more', () => {
+    expect(wma([1, 2, 3, 4], 4)).toEqual([null, null, null, 3]);
+  });
+  it('hull of a constant series equals the constant', () => {
+    const h = hullMA(new Array(30).fill(5));
+    expect(h[29]).toBeCloseTo(5, 10);
+    expect(h[0]).toBeNull();
+  });
+  it('hull rises on an uptrend', () => {
+    const closes = trendingMarket(60, 100, 0.3, 0.05, 5).map((c) => c.close);
+    const h = hullMA(closes);
+    expect(h[59]).toBeGreaterThan(h[30]!);
+  });
+});

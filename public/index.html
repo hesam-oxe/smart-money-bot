@@ -183,6 +183,8 @@ async function loadPair() {
     $('eqStats').textContent = `trades ${b.stats.trades} · PF ${Number.isFinite(b.stats.profitFactor)?b.stats.profitFactor.toFixed(2):'∞'} · expR ${b.stats.expectancyR.toFixed(2)} · PnL $${b.stats.totalPnl.toFixed(0)} · maxDD ${b.stats.maxDrawdownPct.toFixed(1)}% · logRet ${b.stats.totalLogReturn.toFixed(3)}`;
     drawCandles($('pxChart'), b.candlesTail || [], b.zones || [], b.signals || [], b.orderBlocks || [], b.tailFrom || 0);
     $('pxStats').textContent = `${b.bars} bars · ${b.flips} flips · ${b.signals.length} signals · ${(b.zones||[]).length} zones · ${(b.orderBlocks||[]).length} OBs`;
+    const mtf = (b.mtf||[]).map(m => `${m.tf}${m.bull===null?'·':m.bull?'▲':'▼'}`).join(' ');
+    if (mtf) $('pxStats').textContent += ` · MTF ${mtf}`;
     $('blocked').innerHTML = `blocked flips: <b>${b.blockedSummary?.count ?? 0}</b> — ` +
       ((b.blockedSummary?.topReasons||[]).map(([r,n])=>`<span class="chip">${r} ×${n}</span>`).join(' ') || 'none');
   } catch (e) {

@@ -4,12 +4,18 @@ export interface AppConfig {
   pairs: string[];
   timeframeMin: number;
   fresh: boolean;
+  style: string;
+  filterPreset: string;
+  utKey: number;
+  utAtrLen: number;
+  chopStrength: number;
   classicUt: boolean;
   useAdx: boolean;
   adxMin: number;
   useEmaTrend: boolean;
   useVwap: boolean;
   useMtf: boolean;
+  mtfMinAgree: number;
   useRegime: boolean;
   regimeAdxMin: number;
   useVolume: boolean;
@@ -17,14 +23,21 @@ export interface AppConfig {
   useFullCandle: boolean;
   useZoneFilter: boolean;
   useVolatility: boolean;
+  useStructure: boolean;
+  useRsiFilter: boolean;
+  useSupertrendFilter: boolean;
+  useHullFilter: boolean;
   cooldownBars: number;
+  confirmBars: number;
   twoBarConfirm: boolean;
   minConfidence: number;
+  forecastMode: string;
   equity: number;
   riskPct: number;
   slMethod: string;
   huntMult: number;
   atrMult: number;
+  slTicks: number;
   tpChoice: number;
   feeBps: number;
   telegramToken: string;
@@ -74,12 +87,18 @@ export function loadConfig(): AppConfig {
     pairs: str('PAIRS', 'XBTUSD,ETHUSD').split(',').map((s) => s.trim()).filter(Boolean),
     timeframeMin: num('TIMEFRAME', 15),
     fresh: bool('FRESH', false),
+    style: str('STYLE', 'auto'),
+    filterPreset: str('FILTER_PRESET', 'strict'),
+    utKey: num('UT_KEY', 1.5),
+    utAtrLen: num('UT_ATR', 10),
+    chopStrength: num('CHOP', 1.0),
     classicUt: bool('CLASSIC_UT', false),
     useAdx: bool('USE_ADX', true),
     adxMin: num('ADX_MIN', 12),
     useEmaTrend: bool('USE_EMA_TREND', true),
     useVwap: bool('USE_VWAP', true),
     useMtf: bool('USE_MTF', true),
+    mtfMinAgree: num('MTF_MIN_AGREE', 0.5),
     useRegime: bool('USE_REGIME', true),
     regimeAdxMin: num('REGIME_ADX_MIN', 10),
     useVolume: bool('USE_VOLUME', true),
@@ -87,14 +106,21 @@ export function loadConfig(): AppConfig {
     useFullCandle: bool('USE_FULL_CANDLE', false),
     useZoneFilter: bool('USE_ZONE_FILTER', true),
     useVolatility: bool('USE_VOLATILITY', true),
+    useStructure: bool('USE_STRUCTURE', true),
+    useRsiFilter: bool('USE_RSI_FILTER', false),
+    useSupertrendFilter: bool('USE_SUPERTREND_FILTER', false),
+    useHullFilter: bool('USE_HULL_FILTER', false),
     cooldownBars: num('COOLDOWN_BARS', 2),
+    confirmBars: num('CONFIRM_BARS', 0),
     twoBarConfirm: bool('TWO_BAR_CONFIRM', true),
     minConfidence: num('MIN_CONFIDENCE', 40),
+    forecastMode: str('FORECAST_MODE', 'standard'),
     equity: num('EQUITY', 10000),
     riskPct: num('RISK_PCT', 1),
     slMethod: str('SL_METHOD', 'structural'),
     huntMult: num('HUNT_MULT', 0.5),
     atrMult: num('ATR_MULT', 1.3),
+    slTicks: num('SL_TICKS', 200),
     tpChoice: num('TP_CHOICE', 2),
     feeBps: num('FEE_BPS', 5),
     telegramToken: str('TELEGRAM_BOT_TOKEN', ''),

@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { PRESET_15M, rankSignals, runEngine } from '../src/strategy.js';
+import {
+  forecastDuration,
+  PRESET_15M,
+  rankSignals,
+  runEngine,
+  STYLE_PRESETS,
+  styleForTimeframe,
+} from '../src/strategy.js';
 import { utbot } from '../src/indicators.js';
 import type { Candle } from '../src/types.js';
-import { candlesFromCloses, chopMarket, mulberry32 } from './helpers.js';
+import { candlesFromCloses, chopMarket, mulberry32, trendingMarket } from './helpers.js';
 
 const cfg = { ...PRESET_15M };
 
@@ -69,14 +76,14 @@ describe('gates', () => {
 
 describe('confirmation + cooldown machinery', () => {
   it('counts flips identically with or without confirmation', () => {
-    const raw = runEngine(pullbackTrend(), null, 'T', { ...cfg, twoBarConfirm: false });
-    const conf = runEngine(pullbackTrend(), null, 'T', { ...cfg, twoBarConfirm: true });
+    const raw = runEngine(pullbackTrend(), null, 'T', { ...cfg, confirmBars: 1 });
+    const conf = runEngine(pullbackTrend(), null, 'T', { ...cfg, confirmBars: 2 });
     expect(raw.flips).toBe(conf.flips);
     expect(raw.flips).toBeGreaterThan(0);
   });
   it('confirmed signals sit on a held (2-bar) UT direction', () => {
     const cs = pullbackTrend();
-    const out = runEngine(cs, null, 'T', { ...cfg, twoBarConfirm: true });
+    const out = runEngine(cs, null, 'T', { ...cfg, confirmBars: 2 });
     expect(out.signals.length).toBeGreaterThan(0);
     const u = utbot(cs, cfg.utKey, cfg.utAtrLen, { classic: cfg.classicUt, chopStrength: cfg.chopStrength });
     const t2i = new Map(cs.map((c, i) => [c.time, i] as [number, number]));
@@ -84,6 +91,20 @@ describe('confirmation + cooldown machinery', () => {
       const i = t2i.get(s.time)!;
       expect(u.dir[i]).toBe(s.side === 'long' ? 1 : -1);
       expect(u.dir[i]).toBe(u.dir[i - 1]); // direction survived the confirmation bar
+    }
+  });
+  it('3-bar confirmation holds 3 bars', () => {
+    const cs = pullbackTrend();
+    const out = runEngine(cs, null, 'T', { ...cfg, confirmBars: 3 });
+    expect(out.flips).toBeGreaterThan(0);
+    const u = utbot(cs, cfg.utKey, cfg.utAtrLen, { classic: cfg.classicUt, chopStrength: cfg.chopStrength });
+    const t2i = new Map(cs.map((c, i) => [c.time, i] as [number, number]));
+    for (const s of out.signals) {
+      const i = t2i.get(s.time)!;
+      const want = s.side === 'long' ? 1 : -1;
+      expect(u.dir[i]).toBe(want);
+      expect(u.dir[i - 1]).toBe(want);
+      expect(u.dir[i - 2]).toBe(want);
     }
   });
   it('huge cooldown allows at most one signal', () => {
@@ -110,5 +131,99 @@ describe('regime guard', () => {
     const plain = runEngine(pullbackTrend(), null, 'T', cfg);
     const nodata = runEngine(pullbackTrend(), null, 'T', cfg, new Array(440).fill(null));
     expect(nodata.signals.length).toBe(plain.signals.length);
+  });
+});
+
+describe('mtf confluence tapes', () => {
+  const bullTape = trendingMarket(440, 100, 0.3, 0.05, 11);
+  const bearTape = trendingMarket(440, 100, -0.3, 0.05, 12);
+  it('keeps longs when higher timeframes agree', () => {
+    const out = runEngine(pullbackTrend(), [{ minutes: 60, candles: bullTape }], 'T', cfg);
+    expect(out.signals.length).toBeGreaterThanOrEqual(2);
+    expect(out.signals.every((s) => s.side === 'long')).toBe(true);
+  });
+  it('kills longs when higher timeframes disagree', () => {
+    const out = runEngine(pullbackTrend(), [{ minutes: 60, candles: bearTape }], 'T', cfg);
+    expect(out.flips).toBeGreaterThan(0);
+    expect(out.signals.some((s) => s.side === 'long')).toBe(false);
+  });
+});
+
+describe('optional confirmation filters', () => {
+  const plain = runEngine(pullbackTrend(), null, 'T', cfg).signals.length;
+  it.each([
+    ['rsi', { useRsiFilter: true }],
+    ['supertrend', { useSupertrendFilter: true }],
+    ['hull', { useHullFilter: true }],
+  ])('%s filter can only remove signals', (_name, patch) => {
+    const out = runEngine(pullbackTrend(), null, 'T', { ...cfg, ...patch });
+    expect(out.signals.length).toBeLessThanOrEqual(plain);
+  });
+});
+
+describe('lux mode (filters out of the box)', () => {
+  it('emits on every flip when everything optional is off', () => {
+    const lux = {
+      ...cfg,
+      useRegime: false, useAdx: false, useEmaTrend: false, useVwap: false, useMtf: false,
+      useVolume: false, useFullCandle: false, useZoneFilter: false, useVolatility: false,
+      useStructure: false, useRsiFilter: false, useSupertrendFilter: false, useHullFilter: false,
+      cooldownBars: 0, confirmBars: 1, minConfidence: 0,
+    };
+    const out = runEngine(pullbackTrend(), null, 'T', lux);
+    expect(out.flips).toBeGreaterThan(0);
+    expect(out.signals.length).toBe(out.flips);
+  });
+});
+
+describe('trading styles', () => {
+  it('maps timeframes to styles', () => {
+    expect(styleForTimeframe(1)).toBe('scalping');
+    expect(styleForTimeframe(5)).toBe('scalping');
+    expect(styleForTimeframe(15)).toBe('day');
+    expect(styleForTimeframe(60)).toBe('day');
+    expect(styleForTimeframe(240)).toBe('swing');
+    expect(styleForTimeframe(1440)).toBe('swing');
+    expect(styleForTimeframe(10080)).toBe('position');
+  });
+  it('day preset matches the 15m spec (1.5 / 10 / 1.3)', () => {
+    expect(STYLE_PRESETS.day).toMatchObject({ utKey: 1.5, utAtrLen: 10, atrMult: 1.3 });
+    expect(STYLE_PRESETS.scalping.utKey).toBeLessThan(STYLE_PRESETS.position.utKey);
+  });
+});
+
+describe('forecastDuration', () => {
+  const ctx = (over = {}) => ({
+    zoneDistAtr: 5, volRel: 1.2, filtersPassed: 9, adx: 20, atrPct: 0.003, medAtrPct: 0.003, ...over,
+  });
+  it('simple returns the median', () => {
+    expect(forecastDuration([10, 20, 30, 40, 50], 'simple', 0.3, ctx()).bars).toBe(30);
+  });
+  it('standard returns the EWMA (alpha 1 = last value)', () => {
+    expect(forecastDuration([10, 20, 30], 'standard', 1, ctx()).bars).toBe(30);
+  });
+  it('advanced multiplies the five knobs', () => {
+    const { bars, mults } = forecastDuration(
+      [20, 20, 20],
+      'advanced',
+      1,
+      ctx({ zoneDistAtr: 0.5, volRel: 2, filtersPassed: 10, adx: 30, atrPct: 0.001, medAtrPct: 0.004 }),
+    );
+    expect(mults).toMatchObject({ structure: 0.8, regime: 1.1, asset: 1.1 });
+    expect(mults!.flip).toBeCloseTo(1.155, 10);
+    expect(mults!.errorLearn).toBeCloseTo(1, 10);
+    expect(bars).toBe(Math.round(20 * 0.8 * 1.155 * 1 * 1.1 * 1.1));
+  });
+  it('thin history falls back to 10 bars', () => {
+    expect(forecastDuration([5, 6], 'advanced', 0.3, ctx()).bars).toBe(10);
+    expect(forecastDuration([5, 6], 'advanced', 0.3, ctx()).mults).toBeNull();
+  });
+  it('engine records mode + mults on advanced signals', () => {
+    const out = runEngine(pullbackTrend(), null, 'T', { ...cfg, forecastMode: 'advanced' });
+    expect(out.signals.length).toBeGreaterThan(0);
+    for (const s of out.signals) {
+      expect(s.forecastMode).toBe('advanced');
+      if (!s.forecastLowHistory) expect(Object.keys(s.forecastMults ?? {})).toHaveLength(5);
+    }
   });
 });

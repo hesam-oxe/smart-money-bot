@@ -12,6 +12,7 @@ import {
   atr,
   clamp,
   ema,
+  hullMA,
   mean,
   rollingVwap,
   rsi,
@@ -34,8 +35,38 @@ import {
   type Zone,
 } from './smc.js';
 import { computeSL, sizeForRisk, swingRef, takeProfits, type SLMethod } from './risk.js';
+import { mtfBullFraction, type MtfTape } from './mtf.js';
+
+export type TradingStyle = 'auto' | 'scalping' | 'day' | 'swing' | 'position' | 'custom';
+
+export interface StylePreset {
+  utKey: number;
+  utAtrLen: number;
+  atrMult: number;
+  chopStrength: number;
+  label: string;
+}
+
+/** 1-click trading styles (sensitivity / ATR / stop matched to the horizon). */
+export const STYLE_PRESETS: Record<Exclude<TradingStyle, 'auto' | 'custom'>, StylePreset> = {
+  scalping: { utKey: 1.0, utAtrLen: 7, atrMult: 1.0, chopStrength: 1.5, label: 'Scalping 1-5m' },
+  day: { utKey: 1.5, utAtrLen: 10, atrMult: 1.3, chopStrength: 1.0, label: 'Day 15m-1h' },
+  swing: { utKey: 2.0, utAtrLen: 14, atrMult: 1.8, chopStrength: 0.8, label: 'Swing 4h-D' },
+  position: { utKey: 2.5, utAtrLen: 20, atrMult: 2.3, chopStrength: 0.6, label: 'Position D-W' },
+};
+
+/** Auto style from the chart timeframe (matches the preset bands above). */
+export function styleForTimeframe(minutes: number): Exclude<TradingStyle, 'auto' | 'custom'> {
+  if (minutes <= 5) return 'scalping';
+  if (minutes <= 60) return 'day';
+  if (minutes <= 1440) return 'swing';
+  return 'position';
+}
+
+export type ForecastMode = 'simple' | 'standard' | 'advanced';
 
 export interface StrategyConfig {
+  style: TradingStyle;
   utKey: number;
   utAtrLen: number;
   classicUt: boolean;
@@ -48,6 +79,7 @@ export interface StrategyConfig {
   useEmaTrend: boolean;
   useVwap: boolean;
   useMtf: boolean;
+  mtfMinAgree: number;
   useRegime: boolean;
   regimeAdxMin: number;
   useVolume: boolean;
@@ -58,15 +90,21 @@ export interface StrategyConfig {
   useVolatility: boolean;
   minAtrPct: number;
   maxAtrPct: number;
+  useStructure: boolean;
+  useRsiFilter: boolean;
+  useSupertrendFilter: boolean;
+  useHullFilter: boolean;
   cooldownBars: number;
-  twoBarConfirm: boolean;
+  confirmBars: number;
   swingLeft: number;
   swingRight: number;
   minConfidence: number;
+  forecastMode: ForecastMode;
   slMethod: SLMethod;
   huntMult: number;
   atrMult: number;
   slPct: number;
+  slTicks: number;
   tpRs: number[];
   equity: number;
   riskPct: number;
@@ -74,8 +112,9 @@ export interface StrategyConfig {
   scoreWindow: number;
 }
 
-/** Day-trading preset tuned for 15m (UT sens 1.5 / ATR 10). */
+/** Day-trading preset tuned for 15m (UT sens 1.5 / ATR 10 / stop 1.3). */
 export const PRESET_15M: StrategyConfig = {
+  style: 'day',
   utKey: 1.5,
   utAtrLen: 10,
   classicUt: false,
@@ -88,6 +127,7 @@ export const PRESET_15M: StrategyConfig = {
   useEmaTrend: true,
   useVwap: true,
   useMtf: true,
+  mtfMinAgree: 0.5,
   useRegime: true,
   regimeAdxMin: 10,
   useVolume: true,
@@ -98,15 +138,21 @@ export const PRESET_15M: StrategyConfig = {
   useVolatility: true,
   minAtrPct: 0.0005,
   maxAtrPct: 0.05,
+  useStructure: true,
+  useRsiFilter: false,
+  useSupertrendFilter: false,
+  useHullFilter: false,
   cooldownBars: 2,
-  twoBarConfirm: true,
+  confirmBars: 2,
   swingLeft: 3,
   swingRight: 3,
   minConfidence: 40,
+  forecastMode: 'standard',
   slMethod: 'structural',
   huntMult: 0.5,
   atrMult: 1.3,
   slPct: 1.0,
+  slTicks: 200,
   tpRs: [1, 1.5, 2, 3],
   equity: 10000,
   riskPct: 1,
@@ -134,9 +180,49 @@ function anchoredAt(candles: Candle[], anchor: number, i: number): number | null
   return den > 0 ? num / den : null;
 }
 
+export interface ForecastCtx {
+  zoneDistAtr: number;
+  volRel: number;
+  filtersPassed: number;
+  adx: number;
+  atrPct: number;
+  medAtrPct: number;
+}
+
+/**
+ * Trend-duration forecast from this side's completed-trend history.
+ * simple = median; standard = EWMA; advanced = EWMA x 5 adaptive multipliers
+ * (S/R proximity, flip strength, error-learning proxy, regime, volatility profile).
+ */
+export function forecastDuration(
+  hist: number[],
+  mode: ForecastMode,
+  alpha: number,
+  ctx: ForecastCtx,
+): { bars: number; mults: Record<string, number> | null } {
+  if (hist.length < 3) return { bars: 10, mults: null };
+  if (mode === 'simple') {
+    const sorted = [...hist].sort((a, b) => a - b);
+    return { bars: clamp(Math.round(sorted[Math.floor(sorted.length / 2)]!), 1, 500), mults: null };
+  }
+  let ew = hist[0]!;
+  for (const d of hist.slice(1)) ew = alpha * d + (1 - alpha) * ew;
+  if (mode !== 'advanced') return { bars: clamp(Math.round(ew), 1, 500), mults: null };
+  const mStructure = ctx.zoneDistAtr < 1 ? 0.8 : ctx.zoneDistAtr > 3 ? 1.1 : 1.0;
+  const mFlip = (ctx.volRel >= 1.5 ? 1.1 : ctx.volRel >= 1 ? 1.0 : 0.9) * (ctx.filtersPassed >= 8 ? 1.05 : 1.0);
+  const recent = hist.slice(-3);
+  const recentMean = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const mError = clamp(recentMean / Math.max(ew, 1e-9), 0.85, 1.15);
+  const mRegime = ctx.adx >= 25 ? 1.1 : ctx.adx < 12 ? 0.85 : 1.0;
+  const mAsset = ctx.atrPct > 2 * ctx.medAtrPct ? 0.9 : ctx.atrPct < 0.5 * ctx.medAtrPct ? 1.1 : 1.0;
+  const mults = { structure: mStructure, flip: mFlip, errorLearn: mError, regime: mRegime, asset: mAsset };
+  const bars = clamp(Math.round(ew * mStructure * mFlip * mError * mRegime * mAsset), 1, 500);
+  return { bars, mults };
+}
+
 export function runEngine(
   c15: Candle[],
-  c1h: Candle[] | null,
+  mtfTapes: MtfTape[] | null,
   pair: string,
   cfg: StrategyConfig,
   regimeADX: (number | null)[] | null = null,
@@ -150,6 +236,7 @@ export function runEngine(
   const ut = utbot(c15, cfg.utKey, cfg.utAtrLen, { classic: cfg.classicUt, chopStrength: cfg.chopStrength });
   const st = supertrend(c15, 3, 10);
   const rsiS = rsi(closes, 14);
+  const hull = hullMA(closes, 21);
   const adxS = adx(c15, cfg.adxLen);
   const vwap = rollingVwap(c15, cfg.vwapWindow);
   const vma = sma(vols, cfg.volLen);
@@ -158,33 +245,27 @@ export function runEngine(
   const obs = orderBlocks(c15, atrS);
   fairValueGaps(c15); // computed for OB validation + future use
   const divs = rsiDivergence(c15, rsiS, sw.highs, sw.lows);
+  const mtfBull = mtfTapes && mtfTapes.length ? mtfBullFraction(mtfTapes, c15) : new Array(n).fill(null);
 
   // S/R zones from confirmed swing pivots only (causal: no future swings at bar i).
   // Tolerance 1.0xATR merges pivots into real clusters; only multi-touch zones veto.
   const atrVals = atrS.filter((v): v is number => v !== null).sort((a, b) => a - b);
   const medAtr = atrVals.length ? atrVals[Math.floor(atrVals.length / 2)]! : 1;
+  const atrPctVals = c15
+    .map((c, i) => (atrS[i] !== null ? atrS[i]! / c.close : null))
+    .filter((v): v is number => v !== null)
+    .sort((a, b) => a - b);
+  const medAtrPct = atrPctVals.length ? atrPctVals[Math.floor(atrPctVals.length / 2)]! : 0.003;
   const zonesAt = (i: number): Zone[] => {
     const hi = sw.highs.filter((s) => s.idx + cfg.swingRight <= i);
     const lo = sw.lows.filter((s) => s.idx + cfg.swingRight <= i);
     return [...buildZones(hi, -1, medAtr), ...buildZones(lo, 1, medAtr)];
   };
-  const zones = zonesAt(n - 1);
+  // broken-through levels drop off: resistance must sit above price, support below
+  const lastClose = closes[n - 1] ?? 0;
+  const zones = zonesAt(n - 1).filter((z) => (z.dir === -1 ? z.price > lastClose : z.price < lastClose));
 
-  // 1H trend tape aligned onto 15m bars (EMA50 > EMA200 = bull)
-  let htfBull: (boolean | null)[] = new Array(n).fill(null);
-  if (c1h && c1h.length > 210) {
-    const hCloses = c1h.map((c) => c.close);
-    const e50 = ema(hCloses, 50);
-    const e200 = ema(hCloses, 200);
-    let p = 0;
-    for (let i = 0; i < n; i++) {
-      while (p + 1 < c1h.length && c1h[p + 1]!.time <= c15[i]!.time) p++;
-      if (c1h[p]!.time <= c15[i]!.time && e50[p] !== null && e200[p] !== null) {
-        htfBull[i] = e50[p]! > e200[p]!;
-      }
-    }
-  }
-
+  const confirmN = Math.max(1, Math.round(cfg.confirmBars));
   const warm = Math.max(cfg.emaTrendLen + 5, 220);
   const signals: Signal[] = [];
   const blocked: BlockedFlip[] = [];
@@ -194,7 +275,7 @@ export function runEngine(
   let lastFlip = warm;
   let lastDir = ut.dir[warm] ?? 0;
   let lastSignalBar = -1e9;
-  let pending: { side: Side; flipBar: number } | null = null;
+  let pending: { side: Side; flipBar: number; dueBar: number } | null = null;
 
   const emitFlip = (i: number, side: Side): void => {
     const close = c15[i]!.close;
@@ -217,20 +298,23 @@ export function runEngine(
     }
     if (cfg.useEmaTrend) {
       const e = emaT[i];
-      const ok = e !== null && (side === 'long' ? close > e : close < e);
+      const ok = e !== null && e !== undefined && (side === 'long' ? close > e : close < e);
       ok ? passed.push('ema200-trend') : failed.push('ema200-trend');
     }
     if (cfg.useVwap) {
       const rv = vwap[i];
       const av = anchoredAt(c15, lastFlip, i);
       const ok =
-        rv !== null && av !== null && (side === 'long' ? close > rv && close > av : close < rv && close < av);
+        rv !== null && rv !== undefined && av !== null && (side === 'long' ? close > rv && close > av : close < rv && close < av);
       ok ? passed.push('vwap-side') : failed.push('vwap-side');
     }
     if (cfg.useMtf) {
-      const hb = htfBull[i];
-      if (hb === null) passed.push('mtf(nodata)');
-      else (hb === (side === 'long') ? passed.push('mtf') : failed.push('mtf'));
+      const bf = mtfBull[i];
+      if (bf === null || bf === undefined) passed.push('mtf(nodata)');
+      else {
+        const agree = side === 'long' ? bf : 1 - bf;
+        agree >= cfg.mtfMinAgree ? passed.push('mtf') : failed.push(`mtf(${agree.toFixed(2)})`);
+      }
     }
     if (cfg.useVolume) {
       const avg = vma[i] ?? 0;
@@ -249,17 +333,36 @@ export function runEngine(
     if (i - lastSignalBar < cfg.cooldownBars) failed.push('cooldown');
     else passed.push('cooldown');
     if (cfg.useZoneFilter) {
-      const strong = zonesAt(i).filter((z) => z.touches >= 2);
+      // strong + still standing: broken-through levels never veto
+      const strong = zonesAt(i).filter(
+        (z) => z.touches >= 2 && (z.dir === -1 ? z.price > close : z.price < close),
+      );
       const { above, below } = nearestZones(strong, close);
       const opp = side === 'long' ? above : below;
       const dist = opp ? Math.abs(opp.price - close) : Infinity;
       dist > 0.5 * a ? passed.push('zone') : failed.push('zone(into-SR)');
     }
     // structure alignment (bias agrees OR fresh BOS/CHoCH in our direction)
-    {
+    if (cfg.useStructure) {
       const agree = struct.bias[i] === sgn;
       const fresh = struct.events.some((e) => e.dir === sgn && i - e.idx <= 8);
       agree || fresh ? passed.push('structure') : failed.push('structure');
+    } else {
+      passed.push('structure(off)');
+    }
+    if (cfg.useRsiFilter) {
+      const r = rsiS[i];
+      if (r === null || r === undefined) passed.push('rsi(nodata)');
+      else (side === 'long' ? r > 50 : r < 50) ? passed.push('rsi') : failed.push(`rsi(${r.toFixed(0)})`);
+    }
+    if (cfg.useSupertrendFilter) {
+      st.dir[i] === sgn ? passed.push('supertrend') : failed.push('supertrend');
+    }
+    if (cfg.useHullFilter) {
+      const h0 = hull[i];
+      const h1 = hull[i - 1];
+      if (h0 === null || h0 === undefined || h1 === null || h1 === undefined) passed.push('hull(nodata)');
+      else (side === 'long' ? h0 > h1 : h0 < h1) ? passed.push('hull') : failed.push('hull');
     }
 
     if (failed.length) {
@@ -275,7 +378,7 @@ export function runEngine(
     }
     {
       const ln = st.line[i];
-      if (st.dir[i] === sgn && ln !== null) engines['supertrend'] = 10 + 5 * Math.min(1, Math.abs(close - ln) / Math.max(a, 1e-9) / 2);
+      if (st.dir[i] === sgn && ln !== null && ln !== undefined) engines['supertrend'] = 10 + 5 * Math.min(1, Math.abs(close - ln) / Math.max(a, 1e-9) / 2);
       else engines['supertrend'] = 0;
     }
     {
@@ -288,8 +391,9 @@ export function runEngine(
       engines['adx'] = ax >= cfg.adxMin ? 8 + 7 * Math.min(1, (ax - cfg.adxMin) / 25) : 2;
     }
     {
-      const hb = htfBull[i];
-      engines['mtf'] = hb === null ? 7 : hb === (side === 'long') ? 15 : 0;
+      const bf = mtfBull[i];
+      if (bf === null || bf === undefined) engines['mtf'] = 7;
+      else engines['mtf'] = 15 * (side === 'long' ? bf : 1 - bf);
     }
     {
       const avg = vma[i] ?? 0;
@@ -327,26 +431,34 @@ export function runEngine(
       huntMult: cfg.huntMult,
       atrMult: cfg.atrMult,
       pct: cfg.slPct,
+      ticks: cfg.slTicks,
     });
     const tps = takeProfits(close, sl.price, side, cfg.tpRs);
     const { qty, riskUsd } = sizeForRisk(cfg.equity, cfg.riskPct, close, sl.price);
 
     // — trend-duration forecast from this side's own history —
     const hist = durations[side];
-    let forecastBars = 10;
-    let lowHistory = true;
-    let survival: { pct: number; share: number }[] = [];
-    if (hist.length >= 3) {
-      lowHistory = hist.length < 5;
-      let ew = hist[0]!;
-      for (const d of hist.slice(1)) ew = cfg.forecastAlpha * d + (1 - cfg.forecastAlpha) * ew;
-      forecastBars = Math.min(500, Math.max(1, Math.round(ew)));
-      survival = [25, 50, 75, 90].map((pct) => {
-        const cut = (pct / 100) * forecastBars;
-        const share = (hist.filter((d) => d >= cut).length / hist.length) * 100;
-        return { pct, share: Math.round(share) };
-      });
-    }
+    const { above, below } = nearestZones(zonesAt(i), close);
+    const oppZone = side === 'long' ? above : below;
+    const zoneDistAtr = oppZone && a > 0 ? Math.abs(oppZone.price - close) / a : 10;
+    const vmaNow = vma[i] ?? 0;
+    const fc = forecastDuration(hist, cfg.forecastMode, cfg.forecastAlpha, {
+      zoneDistAtr,
+      volRel: vmaNow > 0 ? vols[i]! / vmaNow : 1,
+      filtersPassed: passed.length,
+      adx: adxS.adx[i] ?? 0,
+      atrPct: close > 0 ? a / close : 0,
+      medAtrPct,
+    });
+    const lowHistory = hist.length < 5;
+    const survival =
+      hist.length >= 3
+        ? [25, 50, 75, 90, 100].map((pct) => {
+            const cut = (pct / 100) * fc.bars;
+            const share = (hist.filter((d) => d >= cut).length / hist.length) * 100;
+            return { pct, share: Math.round(share) };
+          })
+        : [];
 
     // — z-score vs recent signals: the ranking key (high score first) —
     scoreHist.push(confidence);
@@ -368,9 +480,11 @@ export function runEngine(
       confidence: Math.round(confidence * 10) / 10,
       z: Math.round(z * 100) / 100,
       engines,
-      forecastBars,
+      forecastBars: fc.bars,
       forecastLowHistory: lowHistory,
       survival,
+      forecastMode: cfg.forecastMode,
+      forecastMults: fc.mults,
       filtersPassed: passed,
     });
     lastSignalBar = i;
@@ -379,26 +493,28 @@ export function runEngine(
   for (let i = warm + 1; i < n; i++) {
     const d = ut.dir[i]!;
     const pd = ut.dir[i - 1]!;
-    // resolve pending 2-bar confirmation first
+    // resolve pending N-bar confirmation first
     if (pending) {
-      if (d === (pending.side === 'long' ? 1 : -1)) {
+      const want: number = pending.side === 'long' ? 1 : -1;
+      if (d !== want) pending = null; // whipsawed before confirmation — kill it
+      else if (i >= pending.dueBar) {
         emitFlip(i, pending.side);
         lastFlip = pending.flipBar;
         lastDir = d;
+        pending = null;
       }
-      pending = null;
     }
     if (d === 0 || pd === 0 || d === pd) continue;
     flips++;
     durations[lastDir > 0 ? 'long' : 'short'].push(i - lastFlip);
     const side: Side = d > 0 ? 'long' : 'short';
-    if (cfg.twoBarConfirm) {
-      pending = { side, flipBar: i };
+    if (confirmN <= 1) {
+      emitFlip(i, side);
+      lastFlip = i;
+      lastDir = d;
       continue;
     }
-    emitFlip(i, side);
-    lastFlip = i;
-    lastDir = d;
+    pending = { side, flipBar: i, dueBar: i + confirmN - 1 };
   }
 
   return {

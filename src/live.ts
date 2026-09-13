@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { loadCandles } from './data.js';
 import { rankSignals, runEngine } from './strategy.js';
+import { loadMtfTapes, type MtfTape } from './mtf.js';
 import { formatSignal, sendTelegram } from './telegram.js';
 import { loadConfig, loadDotEnv } from './config.js';
 import { loadRegimeADX, strategyFromApp } from './backtest.js';
@@ -54,9 +55,9 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
 
   for (const pair of app.pairs) {
     const m15 = await loadCandles(app.provider, pair, app.timeframeMin, { live: true });
-    let h1 = null;
+    let tapes: MtfTape[] = [];
     try {
-      h1 = (await loadCandles(app.provider, pair, 60, {})).closed;
+      tapes = await loadMtfTapes(app.provider, pair, app.timeframeMin, false);
     } catch { /* MTF neutral */ }
     const bars = m15.closed;
     if (!bars.length) continue;
@@ -64,7 +65,7 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
     const isNewBar = state.lastBar[pair] !== lastT;
 
     const regime = strat.useRegime ? await loadRegimeADX(app, pair, bars, false) : null;
-    const eng = runEngine(bars, strat.useMtf ? h1 : null, pair, strat, regime);
+    const eng = runEngine(bars, strat.useMtf ? tapes : null, pair, strat, regime);
     // rescale sizes to live equity (compound)
     const scale = state.equity / strat.equity;
     for (const s of eng.signals) {
@@ -163,12 +164,12 @@ export async function dryRun(): Promise<void> {
   const strat = strategyFromApp(app);
   for (const pair of app.pairs) {
     const m15 = await loadCandles(app.provider, pair, app.timeframeMin, { live: true });
-    let h1 = null;
+    let tapes: MtfTape[] = [];
     try {
-      h1 = (await loadCandles(app.provider, pair, 60, {})).closed;
+      tapes = await loadMtfTapes(app.provider, pair, app.timeframeMin, false);
     } catch { /* MTF neutral */ }
     const regime = strat.useRegime ? await loadRegimeADX(app, pair, m15.closed, false) : null;
-    const eng = runEngine(m15.closed, strat.useMtf ? h1 : null, pair, strat, regime);
+    const eng = runEngine(m15.closed, strat.useMtf ? tapes : null, pair, strat, regime);
     console.log(`\n── ${pair}: ${eng.flips} flips, ${eng.signals.length} signals (dry — nothing saved) ──`);
     for (const s of rankSignals(eng.signals).slice(0, 5)) {
       console.log(`\n${formatSignal(s)}`);

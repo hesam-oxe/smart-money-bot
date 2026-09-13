@@ -10,9 +10,9 @@ import { pathToFileURL } from 'node:url';
 import { loadCandles } from './data.js';
 import { loadConfig, loadDotEnv } from './config.js';
 import { loadRegimeADX, strategyFromApp } from './backtest.js';
+import { loadMtfTapes, type MtfTape } from './mtf.js';
 import { runEngine } from './strategy.js';
 import { runPaper } from './paper.js';
-import type { Candle } from './types.js';
 
 interface Combo {
   utKey: number;
@@ -61,11 +61,11 @@ export async function runTune(): Promise<Scored[]> {
   const fresh = a['fresh'] === 'true';
 
   const m15 = (await loadCandles(app.provider, pair, app.timeframeMin, { fresh })).closed;
-  let h1: Candle[] | null = null;
+  let tapes: MtfTape[] = [];
   try {
-    h1 = (await loadCandles(app.provider, pair, 60, { fresh })).closed;
+    tapes = await loadMtfTapes(app.provider, pair, app.timeframeMin, fresh);
   } catch {
-    console.log('(no 1H tape — MTF runs neutral)');
+    console.log('(no HTF tapes — MTF runs neutral)');
   }
   const n = m15.length;
   if (n < 500) {
@@ -87,9 +87,9 @@ export async function runTune(): Promise<Scored[]> {
   const scored: Scored[] = [];
   for (const combo of GRID) {
     const strat = { ...strategyFromApp(app), ...combo };
-    const isEng = runEngine(isBars, h1, pair, strat, regimeIS);
+    const isEng = runEngine(isBars, tapes, pair, strat, regimeIS);
     const isStats = runPaper(isBars, isEng.signals, paperOpts).stats;
-    const oosEng = runEngine(oosBars, h1, pair, strat, regimeOOS);
+    const oosEng = runEngine(oosBars, tapes, pair, strat, regimeOOS);
     const oosSigs = oosEng.signals.filter((s) => s.time >= splitTime);
     const oosStats = runPaper(oosBars, oosSigs, paperOpts).stats;
     scored.push({

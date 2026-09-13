@@ -7,7 +7,8 @@ function mkSignal(time: number, side: 'long' | 'short', sl: number, tps: number[
   return {
     id: `t-${time}`, pair: 'T', time, side, entry: 100, sl, slMethod: 'atr',
     tps, tpRs: [1, 1.5, 2, 3], size: 1, riskUsd: 2, confidence: 70, z: 1,
-    engines: {}, forecastBars: 50, forecastLowHistory: false, survival: [], filtersPassed: [],
+    engines: {}, forecastBars: 50, forecastLowHistory: false, survival: [],
+    forecastMode: 'standard', forecastMults: null, filtersPassed: [],
   };
 }
 

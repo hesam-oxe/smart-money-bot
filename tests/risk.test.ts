@@ -12,7 +12,7 @@ describe('swing reference', () => {
 });
 
 describe('stops', () => {
-  const ctx = { swing: 95, atr: 2, atrPct: 0.02, huntMult: 0.5, atrMult: 1.3, pct: 1 };
+  const ctx = { swing: 95, atr: 2, atrPct: 0.02, huntMult: 0.5, atrMult: 1.3, pct: 1, ticks: 200 };
   it('structural long sits below the swing (anti-hunt buffer)', () => {
     const sl = computeSL('structural', 'long', 100, ctx);
     expect(sl.price).toBe(95 - 2 * 0.5);
@@ -59,5 +59,13 @@ describe('trade summary', () => {
     expect(s.expectancyR).toBeCloseTo(0.25, 10);
     expect(s.totalPnl).toBe(25);
     expect(s.totalLogReturn).toBeCloseTo(Math.log(10025 / 10000), 10);
+  });
+});
+
+describe('tick stops', () => {
+  it('steps back N venue-like ticks from entry', () => {
+    const base = { swing: null, atr: 2, atrPct: 0.02, huntMult: 0.5, atrMult: 1.3, pct: 1, ticks: 200 };
+    expect(computeSL('tick', 'long', 100, base).price).toBe(98);
+    expect(computeSL('tick', 'short', 100, base).price).toBe(102);
   });
 });

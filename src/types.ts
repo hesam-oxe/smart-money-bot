@@ -37,6 +37,10 @@ export interface Signal {
   forecastLowHistory: boolean;
   /** empirical survival milestones: share of past trends lasting >= pct of projection */
   survival: { pct: number; share: number }[];
+  /** forecast engine used: median / EWMA / EWMA + adaptive multipliers */
+  forecastMode: 'simple' | 'standard' | 'advanced';
+  /** advanced-mode multipliers (structure/flip/errorLearn/regime/asset), else null */
+  forecastMults: Record<string, number> | null;
   filtersPassed: string[];
 }
 

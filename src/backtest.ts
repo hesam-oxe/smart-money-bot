@@ -1,13 +1,23 @@
 #!/usr/bin/env tsx
 /**
- * Backtest CLI: fetch 15m (+1h) bars, run the engine, paper-trade, report.
+ * Backtest CLI: fetch 15m (+HTF) bars, run the engine, paper-trade, report.
  * Usage: npm run backtest -- --pair XBTUSD --fresh
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { loadCandles } from './data.js';
 import { adx } from './indicators.js';
-import { PRESET_15M, rankSignals, runEngine, type StrategyConfig } from './strategy.js';
+import {
+  PRESET_15M,
+  STYLE_PRESETS,
+  rankSignals,
+  runEngine,
+  styleForTimeframe,
+  type ForecastMode,
+  type StrategyConfig,
+  type TradingStyle,
+} from './strategy.js';
+import { loadMtfTapes, mtfSnapshot, type MtfTape } from './mtf.js';
 import { runPaper } from './paper.js';
 import { loadConfig, loadDotEnv, type AppConfig } from './config.js';
 import type { SLMethod } from './risk.js';
@@ -34,28 +44,50 @@ function args(): Record<string, string> {
 }
 
 export function strategyFromApp(c: AppConfig): StrategyConfig {
-  const methods = ['structural', 'atr', 'scaled', 'smart', 'safer', 'percent'];
+  const methods = ['structural', 'atr', 'scaled', 'smart', 'safer', 'percent', 'tick'];
+  const modes = ['simple', 'standard', 'advanced'];
+  const lux = c.filterPreset.toLowerCase() === 'lux';
+  const want = c.style.toLowerCase();
+  type ResolvedStyle = Exclude<TradingStyle, 'auto'>;
+  const style: ResolvedStyle = want === 'auto'
+    ? styleForTimeframe(c.timeframeMin)
+    : (['scalping', 'day', 'swing', 'position', 'custom'].includes(want) ? (want as ResolvedStyle) : 'day');
+  const preset = style === 'custom'
+    ? { utKey: c.utKey, utAtrLen: Math.round(c.utAtrLen), atrMult: c.atrMult, chopStrength: c.chopStrength }
+    : STYLE_PRESETS[style];
+  const confirmBars = c.confirmBars > 0 ? Math.round(c.confirmBars) : c.twoBarConfirm ? 2 : 1;
   return {
     ...PRESET_15M,
+    style,
+    utKey: preset.utKey,
+    utAtrLen: preset.utAtrLen,
+    atrMult: preset.atrMult,
+    chopStrength: preset.chopStrength,
     classicUt: c.classicUt,
-    useAdx: c.useAdx,
+    useAdx: lux ? false : c.useAdx,
     adxMin: c.adxMin,
-    useEmaTrend: c.useEmaTrend,
-    useVwap: c.useVwap,
-    useMtf: c.useMtf,
-    useRegime: c.useRegime,
+    useEmaTrend: lux ? false : c.useEmaTrend,
+    useVwap: lux ? false : c.useVwap,
+    useMtf: lux ? false : c.useMtf,
+    mtfMinAgree: c.mtfMinAgree,
+    useRegime: lux ? false : c.useRegime,
     regimeAdxMin: c.regimeAdxMin,
-    useVolume: c.useVolume,
+    useVolume: lux ? false : c.useVolume,
     volMin: c.volMin,
-    useFullCandle: c.useFullCandle,
-    useZoneFilter: c.useZoneFilter,
-    useVolatility: c.useVolatility,
+    useFullCandle: lux ? false : c.useFullCandle,
+    useZoneFilter: lux ? false : c.useZoneFilter,
+    useVolatility: lux ? false : c.useVolatility,
+    useStructure: lux ? false : c.useStructure,
+    useRsiFilter: lux ? false : c.useRsiFilter,
+    useSupertrendFilter: lux ? false : c.useSupertrendFilter,
+    useHullFilter: lux ? false : c.useHullFilter,
     cooldownBars: c.cooldownBars,
-    twoBarConfirm: c.twoBarConfirm,
-    minConfidence: c.minConfidence,
+    confirmBars,
+    minConfidence: lux ? 0 : c.minConfidence,
+    forecastMode: (modes.includes(c.forecastMode) ? c.forecastMode : 'standard') as ForecastMode,
     slMethod: (methods.includes(c.slMethod) ? c.slMethod : 'structural') as SLMethod,
     huntMult: c.huntMult,
-    atrMult: c.atrMult,
+    slTicks: c.slTicks,
     equity: c.equity,
     riskPct: c.riskPct,
   };
@@ -112,18 +144,19 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
   const allSignals: string[] = [];
 
   for (const pair of pairs) {
-    if (verbose) console.log(`\n═══ ${pair} ${app.timeframeMin}m (${app.provider}) ═══`);
+    if (verbose) console.log(`\n═══ ${pair} ${app.timeframeMin}m (${app.provider}) [${strat.style}] ═══`);
     const m15 = await loadCandles(app.provider, pair, app.timeframeMin, { fresh });
-    let h1 = null;
+    let tapes: MtfTape[] = [];
     try {
-      h1 = (await loadCandles(app.provider, pair, 60, { fresh })).closed;
+      tapes = await loadMtfTapes(app.provider, pair, app.timeframeMin, fresh);
     } catch {
-      if (verbose) console.log('  (no 1H tape — MTF runs neutral)');
+      /* none */
     }
+    if (!tapes.length && verbose) console.log('  (no HTF tapes — MTF runs neutral)');
     const regime = strat.useRegime ? await loadRegimeADX(app, pair, m15.closed, fresh) : null;
     if (verbose) console.log(`  bars: ${m15.closed.length} closed`);
 
-    const eng = runEngine(m15.closed, h1, pair, strat, regime);
+    const eng = runEngine(m15.closed, tapes, pair, strat, regime);
     const paper = runPaper(m15.closed, eng.signals, {
       equity0: app.equity,
       feeBps: app.feeBps,
@@ -167,6 +200,7 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
       blockedSummary: { count: eng.blocked.length, topReasons },
       zones: eng.zones.slice(0, 12),
       orderBlocks: eng.orderBlocks.slice(0, 12),
+      mtf: mtfSnapshot(tapes),
       tailFrom: m15.closed.length - tail.length,
       candlesTail: tail,
     };

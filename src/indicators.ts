@@ -326,3 +326,51 @@ export function rsiDivergence(
   }
   return { bull, bear };
 }
+
+/** Weighted moving average (linear weights 1..period). */
+export function wma(values: number[], period: number): Num {
+  const out: Num = new Array(values.length).fill(null);
+  if (period < 1) return out;
+  const denom = (period * (period + 1)) / 2;
+  for (let i = period - 1; i < values.length; i++) {
+    let num = 0;
+    for (let j = 0; j < period; j++) num += values[i - period + 1 + j]! * (j + 1);
+    out[i] = num / denom;
+  }
+  return out;
+}
+
+/**
+ * Hull moving average: WMA(n/2)*2 - WMA(n), smoothed by WMA(sqrt(n)).
+ * Fast yet smooth — direction flips mark momentum turns.
+ */
+export function hullMA(closes: number[], period = 21): Num {
+  const n = closes.length;
+  const out: Num = new Array(n).fill(null);
+  const half = Math.max(1, Math.floor(period / 2));
+  const sq = Math.max(1, Math.round(Math.sqrt(period)));
+  const wHalf = wma(closes, half);
+  const wFull = wma(closes, period);
+  const diff: number[] = closes.map((_, i) => {
+    const a = wHalf[i];
+    const b = wFull[i];
+    return a === null || a === undefined || b === null || b === undefined ? NaN : 2 * a - b;
+  });
+  const denom = (sq * (sq + 1)) / 2;
+  for (let i = 0; i < n; i++) {
+    let num = 0;
+    let ok = i - sq + 1 >= 0;
+    if (ok) {
+      for (let j = 0; j < sq; j++) {
+        const v = diff[i - sq + 1 + j]!;
+        if (!Number.isFinite(v)) {
+          ok = false;
+          break;
+        }
+        num += v * (j + 1);
+      }
+    }
+    out[i] = ok ? num / denom : null;
+  }
+  return out;
+}
