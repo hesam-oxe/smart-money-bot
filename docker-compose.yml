@@ -1,0 +1,19 @@
+# Smart Money Bot — paper-live loop + dashboard with one command.
+# Usage: cp .env.example .env  &&  docker compose up --build
+services:
+  paper:
+    build: .
+    env_file: .env
+    volumes:
+      - ./results:/app/results
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    env_file: .env
+    volumes:
+      - ./results:/app/results
+    ports:
+      - "8080:8080"
+    command: ["npm", "run", "dashboard"]
+    restart: unless-stopped

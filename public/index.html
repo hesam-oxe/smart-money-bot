@@ -130,7 +130,7 @@ function drawLines(cv, series, opts) {
   ctx.fillText(f2(hi), 10, 14); ctx.fillText(f2(lo), 10, H-4);
 }
 
-function drawCandles(cv, candles, zones, signals) {
+function drawCandles(cv, candles, zones, signals, obs, tailFrom) {
   const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
   ctx.clearRect(0,0,W,H);
   if (!candles.length) { ctx.fillStyle='#8a94ad'; ctx.fillText('no data — run backtest', 20, 30); return; }
@@ -138,6 +138,14 @@ function drawCandles(cv, candles, zones, signals) {
   const pad = (hi-lo)*0.06 || 1; lo -= pad; hi += pad;
   const bw = (W-16) / candles.length;
   const X = (i) => 8 + bw*i + bw/2, Y = (v) => H-12 - (H-24)*(v-lo)/(hi-lo);
+  const tf = tailFrom || 0;
+  for (const o of (obs||[]).slice(0,8)) {
+    const x1 = 8 + bw * Math.max(0, (o.obIdx ?? 0) - tf);
+    const x2 = 8 + bw * Math.min(candles.length, (o.brokenIdx ?? (tf + candles.length)) - tf);
+    if (x2 <= x1 + 1) continue;
+    ctx.fillStyle = o.dir === 1 ? 'rgba(38,194,129,.10)' : 'rgba(255,92,92,.10)';
+    ctx.fillRect(x1, Y(o.top), Math.max(2, x2 - x1), Math.max(2, Y(o.bottom) - Y(o.top)));
+  }
   for (const z of (zones||[]).slice(0,8)) {
     ctx.strokeStyle = z.dir === 1 ? 'rgba(38,194,129,.4)' : 'rgba(255,92,92,.4)';
     ctx.setLineDash([5,4]); ctx.beginPath(); ctx.moveTo(8,Y(z.price)); ctx.lineTo(W-8,Y(z.price)); ctx.stroke();
@@ -173,8 +181,8 @@ async function loadPair() {
     const b = await jget('/api/backtest?pair=' + encodeURIComponent(curPair));
     $('stWin').textContent = b.stats.trades ? b.stats.winRate.toFixed(1)+'%' : '–';
     $('eqStats').textContent = `trades ${b.stats.trades} · PF ${Number.isFinite(b.stats.profitFactor)?b.stats.profitFactor.toFixed(2):'∞'} · expR ${b.stats.expectancyR.toFixed(2)} · PnL $${b.stats.totalPnl.toFixed(0)} · maxDD ${b.stats.maxDrawdownPct.toFixed(1)}% · logRet ${b.stats.totalLogReturn.toFixed(3)}`;
-    drawCandles($('pxChart'), b.candlesTail || [], b.zones || [], b.signals || []);
-    $('pxStats').textContent = `${b.bars} bars · ${b.flips} flips · ${b.signals.length} signals · ${(b.zones||[]).length} zones`;
+    drawCandles($('pxChart'), b.candlesTail || [], b.zones || [], b.signals || [], b.orderBlocks || [], b.tailFrom || 0);
+    $('pxStats').textContent = `${b.bars} bars · ${b.flips} flips · ${b.signals.length} signals · ${(b.zones||[]).length} zones · ${(b.orderBlocks||[]).length} OBs`;
     $('blocked').innerHTML = `blocked flips: <b>${b.blockedSummary?.count ?? 0}</b> — ` +
       ((b.blockedSummary?.topReasons||[]).map(([r,n])=>`<span class="chip">${r} ×${n}</span>`).join(' ') || 'none');
   } catch (e) {

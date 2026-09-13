@@ -10,6 +10,8 @@ export interface AppConfig {
   useEmaTrend: boolean;
   useVwap: boolean;
   useMtf: boolean;
+  useRegime: boolean;
+  regimeAdxMin: number;
   useVolume: boolean;
   volMin: number;
   useFullCandle: boolean;
@@ -78,6 +80,8 @@ export function loadConfig(): AppConfig {
     useEmaTrend: bool('USE_EMA_TREND', true),
     useVwap: bool('USE_VWAP', true),
     useMtf: bool('USE_MTF', true),
+    useRegime: bool('USE_REGIME', true),
+    regimeAdxMin: num('REGIME_ADX_MIN', 10),
     useVolume: bool('USE_VOLUME', true),
     volMin: num('VOL_MIN', 1.0),
     useFullCandle: bool('USE_FULL_CANDLE', false),

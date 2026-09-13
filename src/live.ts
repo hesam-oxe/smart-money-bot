@@ -2,7 +2,7 @@
 /**
  * Paper-live loop: poll fresh 15m bars, emit new ranked signals to Telegram /
  * console, and paper-trade them. Never places real orders.
- * Usage: npm run paper [-- --once]
+ * Usage: npm run paper [-- --once] [-- --dry]
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +10,7 @@ import { loadCandles } from './data.js';
 import { rankSignals, runEngine } from './strategy.js';
 import { formatSignal, sendTelegram } from './telegram.js';
 import { loadConfig, loadDotEnv } from './config.js';
-import { strategyFromApp } from './backtest.js';
+import { loadRegimeADX, strategyFromApp } from './backtest.js';
 import { closeEconomics, updatePosition, type LivePosition } from './positions.js';
 
 interface LiveState {
@@ -63,7 +63,8 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
     const lastT = bars[bars.length - 1]!.time;
     const isNewBar = state.lastBar[pair] !== lastT;
 
-    const eng = runEngine(bars, strat.useMtf ? h1 : null, pair, strat);
+    const regime = strat.useRegime ? await loadRegimeADX(app, pair, bars, false) : null;
+    const eng = runEngine(bars, strat.useMtf ? h1 : null, pair, strat, regime);
     // rescale sizes to live equity (compound)
     const scale = state.equity / strat.equity;
     for (const s of eng.signals) {
@@ -91,6 +92,8 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
           forecastBars: s.forecastBars,
           signalId: s.id,
           breakeven: false,
+          closedFrac: 0,
+          realizedPnl: 0,
         });
       }
     }
@@ -100,13 +103,23 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
     for (const p of [...state.positions]) {
       if (p.pair !== pair) continue;
       if (isNewBar) p.barsHeld++;
-      const ev = updatePosition(p, b);
-      if (ev.movedStopToBreakeven) {
+      const ev = updatePosition(p, b, app.feeBps);
+      if (ev.movedStopToBreakeven && !ev.partial) {
         await saveState(state); // persist the moved stop immediately
         await sendTelegram(
           app.telegramToken,
           app.telegramChatId,
           `🔒 BREAKEVEN ${p.pair} ${p.side}\nTP1 touched — stop moved to entry ${p.entry}`,
+        );
+      }
+      if (ev.partial) {
+        state.equity += ev.partial.pnl;
+        await saveState(state);
+        await sendTelegram(
+          app.telegramToken,
+          app.telegramChatId,
+          `💰 PARTIAL TP1 ${p.pair} ${p.side}\nbanked ${(ev.partial.frac * 100).toFixed(0)}% @ ${ev.partial.price} ` +
+            `(+$${ev.partial.pnl.toFixed(2)}) — stop to breakeven\nEquity $${state.equity.toFixed(2)}`,
         );
       }
       let exit: number | null = ev.exit ? ev.exit.price : null;
@@ -116,14 +129,17 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
         reason = 'TIME ⏱';
       }
       if (exit !== null) {
-        const { pnl } = closeEconomics(p.side, p.entry, exit, p.size, app.feeBps);
+        const remaining = p.size * (1 - p.closedFrac);
+        const { pnl } = closeEconomics(p.side, p.entry, exit, remaining, app.feeBps);
+        const total = p.realizedPnl + pnl;
         state.equity += pnl;
         state.positions = state.positions.filter((x) => x.id !== p.id);
         closedTrades++;
         await sendTelegram(
           app.telegramToken,
           app.telegramChatId,
-          `📕 CLOSED ${reason} ${p.pair} ${p.side}\nentry ${p.entry} → exit ${exit}\nPnL $${pnl.toFixed(2)} | equity $${state.equity.toFixed(2)}`,
+          `📕 CLOSED ${reason} ${p.pair} ${p.side}\nentry ${p.entry} → exit ${exit}\n` +
+            `PnL $${total.toFixed(2)} (banked $${p.realizedPnl.toFixed(2)}) | equity $${state.equity.toFixed(2)}`,
         );
       }
     }
@@ -140,14 +156,6 @@ export async function pollOnce(): Promise<{ newSignals: number; closedTrades: nu
   return { newSignals, closedTrades };
 }
 
-function isMain(): boolean {
-  try {
-    return import.meta.url === pathToFileURL(process.argv[1] ?? '').href;
-  } catch {
-    return false;
-  }
-}
-
 /** Preview fresh signals without touching state, positions or Telegram. */
 export async function dryRun(): Promise<void> {
   await loadDotEnv();
@@ -159,11 +167,20 @@ export async function dryRun(): Promise<void> {
     try {
       h1 = (await loadCandles(app.provider, pair, 60, {})).closed;
     } catch { /* MTF neutral */ }
-    const eng = runEngine(m15.closed, strat.useMtf ? h1 : null, pair, strat);
+    const regime = strat.useRegime ? await loadRegimeADX(app, pair, m15.closed, false) : null;
+    const eng = runEngine(m15.closed, strat.useMtf ? h1 : null, pair, strat, regime);
     console.log(`\n── ${pair}: ${eng.flips} flips, ${eng.signals.length} signals (dry — nothing saved) ──`);
     for (const s of rankSignals(eng.signals).slice(0, 5)) {
       console.log(`\n${formatSignal(s)}`);
     }
+  }
+}
+
+function isMain(): boolean {
+  try {
+    return import.meta.url === pathToFileURL(process.argv[1] ?? '').href;
+  } catch {
+    return false;
   }
 }
 

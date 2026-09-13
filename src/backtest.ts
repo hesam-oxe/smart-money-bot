@@ -6,11 +6,12 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { loadCandles } from './data.js';
+import { adx } from './indicators.js';
 import { PRESET_15M, rankSignals, runEngine, type StrategyConfig } from './strategy.js';
 import { runPaper } from './paper.js';
 import { loadConfig, loadDotEnv, type AppConfig } from './config.js';
 import type { SLMethod } from './risk.js';
-import type { BacktestStats, Trade } from './types.js';
+import type { BacktestStats, Candle, Trade } from './types.js';
 
 export interface BacktestCLIOpts {
   pairs?: string[];
@@ -42,6 +43,8 @@ export function strategyFromApp(c: AppConfig): StrategyConfig {
     useEmaTrend: c.useEmaTrend,
     useVwap: c.useVwap,
     useMtf: c.useMtf,
+    useRegime: c.useRegime,
+    regimeAdxMin: c.regimeAdxMin,
     useVolume: c.useVolume,
     volMin: c.volMin,
     useFullCandle: c.useFullCandle,
@@ -56,6 +59,31 @@ export function strategyFromApp(c: AppConfig): StrategyConfig {
     equity: c.equity,
     riskPct: c.riskPct,
   };
+}
+
+/** BTC pair spellings across the supported venues. */
+const BTC_PAIRS = new Set(['XBTUSD', 'XXBTZUSD', 'BTCUSD', 'BTCUSDT', 'XBTUSDT']);
+
+/**
+ * Market-regime tape: 15m ADX(14) of BTC, time-aligned to `bars`.
+ * BTC-chop shuts down new signals on every pair (the regime guard).
+ * Returns null when the tape is unavailable (guard runs neutral).
+ */
+export async function loadRegimeADX(
+  app: AppConfig,
+  pair: string,
+  bars: Candle[],
+  fresh: boolean,
+): Promise<(number | null)[] | null> {
+  try {
+    if (BTC_PAIRS.has(pair.toUpperCase())) return adx(bars, 14).adx;
+    const btc = (await loadCandles(app.provider, 'XBTUSD', app.timeframeMin, { fresh })).closed;
+    const ax = adx(btc, 14).adx;
+    const byTime = new Map(btc.map((c, i) => [c.time, ax[i] ?? null] as [number, number | null]));
+    return bars.map((c) => byTime.get(c.time) ?? null);
+  } catch {
+    return null;
+  }
 }
 
 export interface PairResult {
@@ -92,9 +120,10 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
     } catch {
       if (verbose) console.log('  (no 1H tape — MTF runs neutral)');
     }
+    const regime = strat.useRegime ? await loadRegimeADX(app, pair, m15.closed, fresh) : null;
     if (verbose) console.log(`  bars: ${m15.closed.length} closed`);
 
-    const eng = runEngine(m15.closed, h1, pair, strat);
+    const eng = runEngine(m15.closed, h1, pair, strat, regime);
     const paper = runPaper(m15.closed, eng.signals, {
       equity0: app.equity,
       feeBps: app.feeBps,
@@ -124,6 +153,7 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
     }
 
     const safe = pair.replace(/[^A-Za-z0-9]/g, '');
+    const tail = m15.closed.slice(-240);
     const payload = {
       pair,
       timeframeMin: app.timeframeMin,
@@ -136,7 +166,9 @@ export async function runBacktest(cli: BacktestCLIOpts = {}): Promise<Record<str
       trades: paper.trades,
       blockedSummary: { count: eng.blocked.length, topReasons },
       zones: eng.zones.slice(0, 12),
-      candlesTail: m15.closed.slice(-240),
+      orderBlocks: eng.orderBlocks.slice(0, 12),
+      tailFrom: m15.closed.length - tail.length,
+      candlesTail: tail,
     };
     await writeFile(`results/backtest-${safe}.json`, JSON.stringify(payload));
     await writeFile(`results/equity-${safe}.json`, JSON.stringify(paper.equityCurve));

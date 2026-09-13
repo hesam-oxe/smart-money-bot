@@ -17,12 +17,13 @@ forecasts, Telegram alerts, and an HTML cockpit dashboard.
 
 1. **UT-Bot core** — ATR × sensitivity ratcheting trailing stop, classic or adaptive
    (Kaufman efficiency ratio + volume + volatility regime tighten/loosen the trail).
-2. **Regime & trend guard** — EMA 200 alignment, rolling + flip-anchored VWAP side,
-   ADX strength with DI agreement, optional 1h EMA-bias confirmation.
+2. **Regime & trend guard** — market-regime shutdown (BTC 15m ADX floor), EMA 200
+   alignment, rolling + flip-anchored VWAP side, ADX strength with DI agreement,
+   optional 1h EMA-bias confirmation.
 3. **Smart Money reading** — zigzag swings, BOS/CHoCH bias, order blocks that must
    prove themselves two ways (FVG overlap **or** volume spike), fair value gaps,
    swing-cluster S/R zones (causal — no future data leaks into signals).
-4. **Fake-signal filter stack** — ADX regime, EMA200, VWAP, MTF, volume, full-candle,
+4. **Fake-signal filter stack** — regime, ADX, EMA200, VWAP, MTF, volume, full-candle,
    volatility band, cooldown, zone-proximity, and structure agreement. Most flips die
    here — that is the point. A 2-bar confirmation kills 1-bar whipsaws.
 5. **Confidence + ranking** — seven engines (UT distance, SuperTrend, structure,
@@ -33,7 +34,7 @@ forecasts, Telegram alerts, and an HTML cockpit dashboard.
    survival-table duration forecast that doubles as a time stop.
 7. **Paper broker** — next-open fills, SL-checked-first intrabar exits, fees, equity
    curve, full stats (win rate, profit factor, expectancy, log returns). Live
-   positions move the stop to breakeven once TP1 touches.
+   positions bank half at TP1, move the stop to breakeven, and ride the rest to TP.
 
 ## Quick start
 
@@ -50,6 +51,13 @@ npm run dashboard                 # cockpit UI -> http://localhost:8080
 npm test                          # vitest suite
 ```
 
+Or everything at once with Docker:
+
+```bash
+cp .env.example .env
+docker compose up --build   # paper-live loop + dashboard on :8080, shared ./results
+```
+
 Zero API keys needed — the default Kraken provider uses public OHLC endpoints.
 Note: Kraken caps public OHLC at the latest 720 bars (~7.5 days on 15m), so each
 backtest covers about a week; live paper trading is unaffected (history accumulates).
@@ -64,6 +72,7 @@ Copy `.env.example` to `.env` — every knob is there with defaults:
 | `PAIRS` | `XBTUSD,ETHUSD` | comma-separated Kraken pairs |
 | `TIMEFRAME` | `15` | minutes per bar |
 | `CLASSIC_UT` | `false` | `true` = classic UT trail (no adaptive layer) |
+| `USE_REGIME` / `REGIME_ADX_MIN` | `true` / `10` | block new signals while BTC 15m ADX < floor |
 | `USE_ADX` / `ADX_MIN` | `true` / `12` | ADX regime filter + DI agreement |
 | `USE_EMA_TREND` | `true` | close must agree with EMA200 side |
 | `USE_VWAP` | `true` | close must agree with rolling + anchored VWAP |
@@ -95,7 +104,7 @@ in the repo. Trust OOS expectancy, not IS. Full grid lands in `results/tune-*.js
 
 | File | What it is |
 |---|---|
-| `backtest-<PAIR>.json` | signals, trades, stats, zones, candle tail |
+| `backtest-<PAIR>.json` | signals, trades, stats, zones, order blocks, candle tail |
 | `trades-<PAIR>.csv` | trade log — opens in Excel / Google Sheets |
 | `equity-<PAIR>.json` | per-bar equity curve for the dashboard |
 | `portfolio.json` | multi-pair aggregate (independent sims, PnL summed) |
@@ -105,9 +114,9 @@ in the repo. Trust OOS expectancy, not IS. Full grid lands in `results/tune-*.js
 
 ## Telegram alerts
 
-Set the two `TELEGRAM_*` vars (env or `.env`) and every fresh signal, breakeven move,
-and paper close is pushed to your chat automatically. Without them, alerts print to
-the console.
+Set the two `TELEGRAM_*` vars (env or `.env`) and every fresh signal, partial TP,
+breakeven move, and paper close is pushed to your chat automatically. Without them,
+alerts print to the console.
 
 ## Project layout
 
@@ -119,13 +128,13 @@ the console.
 | `src/risk.ts` | stop methods, R targets, sizing, trade stats |
 | `src/strategy.ts` | signal engine: flips → filters → confidence → plan → forecast → z-rank |
 | `src/paper.ts` | paper broker + equity curve |
-| `src/positions.ts` | live position updates: SL-first, TP1→breakeven (pure, tested) |
+| `src/positions.ts` | live position ladder: SL-first, TP1 banks half + breakeven (pure, tested) |
 | `src/telegram.ts` | Bot API alerts with console fallback |
-| `src/backtest.ts` | backtest CLI (+ CSV export, portfolio aggregate) |
+| `src/backtest.ts` | backtest CLI (+ CSV export, portfolio aggregate, regime tape) |
 | `src/tune.ts` | walk-forward-lite parameter tuner |
 | `src/live.ts` | paper-live polling loop |
 | `src/dashboard.ts` | zero-dep HTTP server + JSON APIs |
-| `public/index.html` | cockpit dashboard UI |
+| `public/index.html` | cockpit dashboard UI (candles + zones + order blocks + signals) |
 | `tests/` | vitest suites + seeded synthetic markets |
 
 ## Paper-live vs backtest
@@ -136,11 +145,16 @@ the console.
   the engine with compounding sizes, keeps one paper position per pair in
   `results/live-state.json`, prints signals and Telegram-alerts them.
 
+Note: the backtest broker aims at a single R-target per trade, while live positions
+work a ladder (half off at TP1 + breakeven stop). Live and backtest PnL will differ
+slightly by design — the backtest is the conservative case.
+
 ## What to expect
 
 The filter stack is deliberately strict: in choppy markets most UT flips are
 rejected (often 90%+) and the bot stays quiet — silence is a feature, not a bug.
-Signals cluster in trending legs with pullback-continuation structure. Always
+When BTC itself stops trending, the regime guard shuts down new signals on every
+pair. Signals cluster in trending legs with pullback-continuation structure. Always
 forward-test on paper; a week of backtest is not evidence of an edge.
 
 ## Disclaimer

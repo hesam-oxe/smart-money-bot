@@ -9,7 +9,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { loadCandles } from './data.js';
 import { loadConfig, loadDotEnv } from './config.js';
-import { strategyFromApp } from './backtest.js';
+import { loadRegimeADX, strategyFromApp } from './backtest.js';
 import { runEngine } from './strategy.js';
 import { runPaper } from './paper.js';
 import type { Candle } from './types.js';
@@ -75,16 +75,21 @@ export async function runTune(): Promise<Scored[]> {
   const mid = Math.floor(n / 2);
   const splitTime = m15[mid]!.time;
   const isBars = m15.slice(0, mid);
-  const oosBars = m15.slice(Math.max(0, mid - 220)); // 220-bar warm prefix; only post-split signals count
+  const oosFrom = Math.max(0, mid - 220);
+  const oosBars = m15.slice(oosFrom); // 220-bar warm prefix; only post-split signals count
+  const strat0 = strategyFromApp(app);
+  const regimeFull = strat0.useRegime ? await loadRegimeADX(app, pair, m15, fresh) : null;
+  const regimeIS = regimeFull ? regimeFull.slice(0, mid) : null;
+  const regimeOOS = regimeFull ? regimeFull.slice(oosFrom) : null;
   const paperOpts = { equity0: app.equity, feeBps: app.feeBps, tpIndex: app.tpChoice, useTimeStop: true };
 
   console.log(`tuning ${pair}: ${n} bars, IS=first ${mid}, OOS=last ${n - mid} (split ${new Date(splitTime).toISOString().slice(0, 16)})`);
   const scored: Scored[] = [];
   for (const combo of GRID) {
     const strat = { ...strategyFromApp(app), ...combo };
-    const isEng = runEngine(isBars, h1, pair, strat);
+    const isEng = runEngine(isBars, h1, pair, strat, regimeIS);
     const isStats = runPaper(isBars, isEng.signals, paperOpts).stats;
-    const oosEng = runEngine(oosBars, h1, pair, strat);
+    const oosEng = runEngine(oosBars, h1, pair, strat, regimeOOS);
     const oosSigs = oosEng.signals.filter((s) => s.time >= splitTime);
     const oosStats = runPaper(oosBars, oosSigs, paperOpts).stats;
     scored.push({

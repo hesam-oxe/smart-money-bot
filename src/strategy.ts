@@ -48,6 +48,8 @@ export interface StrategyConfig {
   useEmaTrend: boolean;
   useVwap: boolean;
   useMtf: boolean;
+  useRegime: boolean;
+  regimeAdxMin: number;
   useVolume: boolean;
   volLen: number;
   volMin: number;
@@ -86,6 +88,8 @@ export const PRESET_15M: StrategyConfig = {
   useEmaTrend: true,
   useVwap: true,
   useMtf: true,
+  useRegime: true,
+  regimeAdxMin: 10,
   useVolume: true,
   volLen: 20,
   volMin: 1.0,
@@ -135,6 +139,7 @@ export function runEngine(
   c1h: Candle[] | null,
   pair: string,
   cfg: StrategyConfig,
+  regimeADX: (number | null)[] | null = null,
 ): EngineOut {
   const n = c15.length;
   const closes = c15.map((c) => c.close);
@@ -199,6 +204,12 @@ export function runEngine(
     const sgn = side === 'long' ? 1 : -1;
 
     // — hard filters (fake-signal killers) —
+    // market-regime guard: BTC-chop shuts down new signals (missing data = neutral)
+    if (cfg.useRegime && regimeADX) {
+      const rax = regimeADX[i];
+      if (rax === null || rax === undefined) passed.push('regime(nodata)');
+      else rax >= cfg.regimeAdxMin ? passed.push('regime') : failed.push(`regime(chop-${rax.toFixed(0)})`);
+    }
     if (cfg.useAdx) {
       const ax = adxS.adx[i] ?? 0;
       const diOk = side === 'long' ? (adxS.plusDI[i] ?? 0) > (adxS.minusDI[i] ?? 0) : (adxS.minusDI[i] ?? 0) > (adxS.plusDI[i] ?? 0);

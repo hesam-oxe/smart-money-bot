@@ -91,3 +91,24 @@ describe('confirmation + cooldown machinery', () => {
     expect(out.signals.length).toBeLessThanOrEqual(1);
   });
 });
+
+describe('regime guard', () => {
+  const chop = new Array(440).fill(5); // BTC dead-chop ADX
+  const trend = new Array(440).fill(25);
+  it('blocks everything when the market chops', () => {
+    const out = runEngine(pullbackTrend(), null, 'T', cfg, chop);
+    expect(out.flips).toBeGreaterThan(0);
+    expect(out.signals).toHaveLength(0);
+    expect(out.blocked.some((b) => b.blockedBy.some((r) => r.startsWith('regime(')))).toBe(true);
+  });
+  it('passes through when the market trends', () => {
+    const plain = runEngine(pullbackTrend(), null, 'T', cfg);
+    const guarded = runEngine(pullbackTrend(), null, 'T', cfg, trend);
+    expect(guarded.signals.length).toBe(plain.signals.length);
+  });
+  it('treats missing regime data as neutral', () => {
+    const plain = runEngine(pullbackTrend(), null, 'T', cfg);
+    const nodata = runEngine(pullbackTrend(), null, 'T', cfg, new Array(440).fill(null));
+    expect(nodata.signals.length).toBe(plain.signals.length);
+  });
+});

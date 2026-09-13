@@ -9,6 +9,7 @@ const bar = (high: number, low: number): Candle => ({
 const pos = (over: Partial<LivePosition> = {}): LivePosition => ({
   id: 'p', pair: 'T', side: 'long', entry: 100, sl: 98, tp: 104, tp1: 102,
   size: 1, entryTime: 0, barsHeld: 0, forecastBars: 50, signalId: 's', breakeven: false,
+  closedFrac: 0, realizedPnl: 0,
   ...over,
 });
 
@@ -22,9 +23,10 @@ describe('updatePosition (long)', () => {
     expect(ev.exit!.reason).toBe('sl');
   });
   it('exits at TP without touching the stop', () => {
-    const p = pos();
+    const p = pos({ tp1: 106 }); // TP1 never touched on this bar
     const ev = updatePosition(p, bar(105, 99));
     expect(ev.exit).toEqual({ price: 104, reason: 'tp' });
+    expect(ev.partial).toBeNull();
     expect(p.breakeven).toBe(false);
   });
   it('arms breakeven at TP1 and keeps the trade alive', () => {
@@ -78,5 +80,51 @@ describe('closeEconomics', () => {
     expect(paid.pnl).toBeCloseTo(8 - paid.fees, 10);
     const short = closeEconomics('short', 100, 96, 1, 0);
     expect(short.pnl).toBe(4);
+  });
+});
+
+describe('partial profit-taking', () => {
+  it('banks half at TP1 and moves the stop (long)', () => {
+    const p = pos(); // entry 100, tp1 102, tp 104, size 1
+    const ev = updatePosition(p, bar(103, 99), 0);
+    expect(ev.exit).toBeNull();
+    expect(ev.partial).not.toBeNull();
+    expect(ev.partial!.frac).toBe(0.5);
+    expect(ev.partial!.pnl).toBeCloseTo((102 - 100) * 0.5, 10);
+    expect(p.closedFrac).toBe(0.5);
+    expect(p.realizedPnl).toBeCloseTo(1, 10);
+    expect(p.sl).toBe(100);
+  });
+  it('exits the rest at TP after banking', () => {
+    const p = pos();
+    updatePosition(p, bar(103, 99), 0);
+    const ev = updatePosition(p, bar(105, 100.5), 0);
+    expect(ev.exit).toEqual({ price: 104, reason: 'tp' });
+    const { pnl } = closeEconomics('long', 100, 104, 0.5, 0);
+    expect(p.realizedPnl + pnl).toBeCloseTo(1 + 2, 10);
+  });
+  it('banks and exits on the same bar when price sweeps through TP', () => {
+    const p = pos();
+    const ev = updatePosition(p, bar(105, 99), 0); // through tp1 AND tp, no SL touch
+    expect(ev.partial!.frac).toBe(0.5);
+    expect(ev.exit).toEqual({ price: 104, reason: 'tp' });
+  });
+  it('skips the partial when the final TP equals TP1', () => {
+    const p = pos({ tp: 102 });
+    const ev = updatePosition(p, bar(103, 99), 0);
+    expect(ev.partial).toBeNull();
+    expect(ev.exit).toEqual({ price: 102, reason: 'tp' });
+  });
+  it('short banks symmetrically', () => {
+    const p = pos({ side: 'short', sl: 102, tp: 96, tp1: 98 });
+    const ev = updatePosition(p, bar(101, 97.5), 0);
+    expect(ev.partial!.pnl).toBeCloseTo((100 - 98) * 0.5, 10);
+    expect(p.sl).toBe(100);
+  });
+  it('charges fees on the partial fill', () => {
+    const p = pos();
+    const ev = updatePosition(p, bar(103, 99), 100); // 1% round-trip fee rate
+    const qty = 0.5;
+    expect(ev.partial!.pnl).toBeCloseTo((102 - 100) * qty - (100 * qty + 102 * qty) * 0.01, 10);
   });
 });
